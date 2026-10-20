@@ -1,15 +1,16 @@
-/* Panel Studio v5 — freehand wires · drag-drop · pan/zoom · real-scale */
+/* Panel Studio v6 — polyline free wires (straight segments) · drag-drop · pan/zoom */
 (() => {
   const $ = (id) => document.getElementById(id);
   const NS = 'http://www.w3.org/2000/svg';
   const C = window.PANEL_CATALOG;
   const MODULE = C.MODULE_MM;
   const STORAGE = 'panel-studio-v1';
-  const VERSION = 5;
+  const VERSION = 6;
   const LONG_PRESS_MS = 380;
   const MOVE_THRESH = 8;
-  const WIRE_SAMPLE = 4;
-  const RDP_EPS = 3.5;
+  const CORNER_HOLD_MS = 400;
+  const RDP_MIGRATE_EPS = 8;
+  const SOFT_AXIS_DEG = 3;
   const TERM_SNAP = 22;
   const ROUTES = ['free', 'vhv', 'hvh', 'straight'];
 
@@ -71,7 +72,9 @@
   let ghostEl = null;
   let lastBendTap = 0;
   let pointers = new Map();
-  let wireSketch = null; // tap-by-tap: { from, points, lastTapMs }
+  let wireSketch = null; // polyline sketch: { from, corners, lastTapMs }
+  let angleSnapOn = false;
+  let shiftHeld = false;
 
   /* —— Catalog helpers —— */
   const devicesFor = (m) => C.devices.filter((d) => d.modes.includes(m));
@@ -237,9 +240,14 @@
     if (!a || !b) return null;
     // at least one end should be a terminal (orphan free–free discarded)
     if (a.free && b.free) return null;
-    const bends = Array.isArray(w.bends)
+    let bends = Array.isArray(w.bends)
       ? w.bends.filter((p) => p && Number.isFinite(p.x) && Number.isFinite(p.y)).slice(0, 80).map((p) => ({ x: Math.round(p.x), y: Math.round(p.y) }))
       : [];
+    const route = normalizeRoute(w.route);
+    // Dense freehand → corners (full migrate with endpoints happens in migrate())
+    if (route === 'free' && bends.length >= 12) {
+      bends = ramerDouglasPeucker(dedupePts(bends), RDP_MIGRATE_EPS);
+    }
     const width = Number(w.width);
     return {
       id: w.id,
@@ -247,7 +255,7 @@
       b,
       color: w.color,
       width: Number.isFinite(width) ? Math.max(1, Math.min(8, width)) : 2.5,
-      route: normalizeRoute(w.route),
+      route,
       bends
     };
   }
@@ -299,6 +307,28 @@
         if (!nw) return null;
         wires.push(nw);
       }
+      // Collapse legacy freehand squiggles → corner polylines
+      const portOf = (end) => {
+        if (!end) return null;
+        if (end.free) return { x: end.x, y: end.y };
+        const d = devices.find((x) => x.id === end.id);
+        if (!d) return null;
+        const t = spec(d.type);
+        if (!t) return null;
+        const n = Math.max(1, t.poles | 0);
+        const w = deviceWidth(t);
+        const h = deviceHeight(t);
+        const col = end.i % n;
+        const top = end.i < n;
+        return { x: d.x + ((col + 1) * w) / (n + 1), y: d.y + (top ? 0 : h) };
+      };
+      wires.forEach((w) => {
+        if (normalizeRoute(w.route) !== 'free' || w.bends.length < 3) return;
+        const a = portOf(w.a);
+        const b = portOf(w.b);
+        if (a && b) w.bends = migrateFreehandBends(w.bends, a, b);
+        else if (w.bends.length >= 12) w.bends = ramerDouglasPeucker(dedupePts(w.bends), RDP_MIGRATE_EPS);
+      });
       // soft clamp into current geometry
       const migrated = devices.map((d) => {
         const t = spec(d.type);
@@ -313,7 +343,13 @@
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE));
     const m = migrate(saved);
-    if (m) data = m;
+    if (m) {
+      data = m;
+      // rewrite storage so legacy freehand gets corner-migrated on disk
+      try {
+        localStorage.setItem(STORAGE, JSON.stringify(data));
+      } catch (_) {}
+    }
   } catch (_) {}
 
   function checkpoint() {
@@ -546,15 +582,68 @@
     if (pts.length < 2) return '';
     return pts.map((p, i) => `${i ? 'L' : 'M'}${Math.round(p.x)},${Math.round(p.y)}`).join(' ');
   }
-  function previewPath(a, to, route, freePath) {
+  function wantAngleSnap() {
+    return angleSnapOn || shiftHeld;
+  }
+  /** Snap point relative to `from`: soft H/V (±3°) always; 0/45/90 when Shift or toggle. */
+  function snapSegmentPoint(from, to, forceOrtho) {
+    if (!from || !to) return to;
+    let x = to.x;
+    let y = to.y;
+    const dx = x - from.x;
+    const dy = y - from.y;
+    const len = Math.hypot(dx, dy);
+    if (len < 1) return { x: Math.round(from.x), y: Math.round(from.y) };
+    const deg = (Math.atan2(dy, dx) * 180) / Math.PI;
+    const soft = SOFT_AXIS_DEG;
+    // soft near-horizontal / near-vertical
+    if (Math.abs(deg) <= soft || Math.abs(Math.abs(deg) - 180) <= soft) {
+      return { x: Math.round(x), y: Math.round(from.y) };
+    }
+    if (Math.abs(Math.abs(deg) - 90) <= soft) {
+      return { x: Math.round(from.x), y: Math.round(y) };
+    }
+    if (forceOrtho || wantAngleSnap()) {
+      const step = 45;
+      const snapped = Math.round(deg / step) * step;
+      const rad = (snapped * Math.PI) / 180;
+      return {
+        x: Math.round(from.x + Math.cos(rad) * len),
+        y: Math.round(from.y + Math.sin(rad) * len)
+      };
+    }
+    return { x: Math.round(x), y: Math.round(y) };
+  }
+  function lastCornerAnchor(fromEnd, corners) {
+    if (corners && corners.length) return corners[corners.length - 1];
+    return resolveEnd(fromEnd);
+  }
+  function previewPath(a, to, route, corners) {
     const r = normalizeRoute(route);
     if (r === 'free') {
-      const pts = freePath && freePath.length ? freePath : [a, to];
-      return pathD(dedupePts([...pts, to]));
+      const mids = corners || [];
+      return pathD(dedupePts([a, ...mids, to]));
     }
     if (r === 'straight') return pathD([a, to]);
     const bends = defaultBends(a, to, r);
     return pathD([a, ...bends, to]);
+  }
+  /** Collapse old freehand squiggles to corner polylines on load. */
+  function migrateFreehandBends(bends, a, b) {
+    if (!Array.isArray(bends) || bends.length < 3) return bends || [];
+    const pts = dedupePts([a, ...bends, b]);
+    if (pts.length < 4) return bends.map((p) => ({ x: Math.round(p.x), y: Math.round(p.y) }));
+    let short = 0;
+    for (let i = 1; i < pts.length; i++) {
+      if (Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y) < 16) short++;
+    }
+    // rewrite dense freehand-like paths OR any free wire with many points
+    const dense = short >= (pts.length - 1) * 0.3 || bends.length >= 12;
+    if (!dense) return bends.map((p) => ({ x: Math.round(p.x), y: Math.round(p.y) }));
+    let simp = ramerDouglasPeucker(pts, RDP_MIGRATE_EPS);
+    if (simp.length && a && Math.hypot(simp[0].x - a.x, simp[0].y - a.y) < 3) simp = simp.slice(1);
+    if (simp.length && b && Math.hypot(simp[simp.length - 1].x - b.x, simp[simp.length - 1].y - b.y) < 3) simp = simp.slice(0, -1);
+    return simp.map((p) => ({ x: Math.round(p.x), y: Math.round(p.y) }));
   }
   function wireTouchesDevice(w, id) {
     return (w.a && w.a.id === id) || (w.b && w.b.id === id);
@@ -720,21 +809,24 @@
       b.append(g);
     });
 
-    // Live wire preview (freehand / routed)
+    // Live wire preview — straight rubber-band from last corner
     if (drag && drag.kind === 'wire' && drag.from) {
-      const a = resolveEnd(drag.from);
-      if (a) {
-        const to = drag.hover || drag.cur || a;
-        const d = previewPath(a, to, drag.route || currentRoute(), drag.path);
+      const a0 = resolveEnd(drag.from);
+      if (a0) {
+        const corners = drag.corners || [];
+        const to = drag.hover || drag.cur || a0;
+        const d = previewPath(a0, to, drag.route || currentRoute(), corners);
         b.append(el('path', { d, fill: 'none', stroke: $('color').value, 'stroke-width': 2.5, 'stroke-dasharray': '5 4', opacity: 0.9, 'pointer-events': 'none', 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
+        corners.forEach((p) => b.append(el('circle', { cx: p.x, cy: p.y, r: 5, class: 'wire-sketch-dot' })));
         if (drag.hover) b.append(el('circle', { cx: drag.hover.x, cy: drag.hover.y, r: 10, fill: '#f0aa31', stroke: '#0a6b5c', 'stroke-width': 2, 'pointer-events': 'none' }));
       }
     }
-    // Tap-by-tap sketch preview
+    // Tap-by-tap / lift-and-tap sketch preview
     if (wireSketch && wireSketch.from) {
       const a = resolveEnd(wireSketch.from);
       if (a) {
-        const pts = [a, ...(wireSketch.points || [])];
+        const corners = wireSketch.corners || wireSketch.points || [];
+        const pts = [a, ...corners];
         if (pts.length >= 2) b.append(el('path', { d: pathD(pts), fill: 'none', stroke: $('color').value, 'stroke-width': 2.2, 'stroke-dasharray': '4 3', opacity: 0.85, 'pointer-events': 'none' }));
         pts.forEach((p, i) => b.append(el('circle', { cx: p.x, cy: p.y, r: i === 0 ? 6 : 4, class: 'wire-sketch-dot' })));
       }
@@ -855,14 +947,63 @@
         if (!handles.length && (route === 'vhv' || route === 'hvh')) {
           handles = defaultBends(resolveEnd(w.a), resolveEnd(w.b), route);
         }
+        // Mid-segment handles — tap to insert a corner (keeps adjacent segments straight)
+        if (route === 'free' || route === 'straight' || handles.length) {
+          const poly = pts;
+          for (let si = 0; si < poly.length - 1; si++) {
+            const mx = (poly[si].x + poly[si + 1].x) / 2;
+            const my = (poly[si].y + poly[si + 1].y) / 2;
+            const mh = el('circle', { cx: mx, cy: my, r: 6, class: 'mid-handle' });
+            mh.addEventListener('pointerdown', (e) => {
+              e.stopPropagation();
+              checkpoint();
+              if (route === 'straight') w.route = 'free';
+              if (!w.bends.length && (route === 'vhv' || route === 'hvh')) w.bends = handles.map((p) => ({ x: p.x, y: p.y }));
+              // insert after bend index si-1 (polyline = a + bends + b)
+              const bi = Math.max(0, Math.min(w.bends.length, si));
+              w.bends.splice(bi, 0, { x: Math.round(mx), y: Math.round(my) });
+              drag = { kind: 'bend', wireId: w.id, index: bi };
+              try {
+                b.setPointerCapture(e.pointerId);
+              } catch (_) {}
+              render();
+              properties();
+            });
+            g.append(mh);
+          }
+        }
         handles.forEach((bp, i) => {
           const h = el('circle', { cx: bp.x, cy: bp.y, r: 8, class: 'bend-handle' });
+          let holdTimer = null;
+          const deleteCorner = () => {
+            checkpoint();
+            if (!w.bends.length) {
+              if (route === 'vhv' || route === 'hvh') {
+                w.bends = handles.map((p) => ({ x: p.x, y: p.y }));
+              } else return;
+            }
+            w.bends.splice(i, 1);
+            render();
+            properties();
+            persist();
+          };
           h.addEventListener('pointerdown', (e) => {
             e.stopPropagation();
             checkpoint();
             if (!w.bends.length) w.bends = handles.map((p) => ({ x: p.x, y: p.y }));
             if (route === 'straight') w.route = 'free';
-            drag = { kind: 'bend', wireId: w.id, index: i };
+            drag = { kind: 'bend', wireId: w.id, index: i, startX: e.clientX, startY: e.clientY };
+            holdTimer = setTimeout(() => {
+              holdTimer = null;
+              if (drag && drag.kind === 'bend' && drag.wireId === w.id && !drag.moved) {
+                drag = null;
+                deleteCorner();
+              }
+            }, LONG_PRESS_MS);
+            drag._holdClear = () => {
+              if (holdTimer) clearTimeout(holdTimer);
+              holdTimer = null;
+            };
             try {
               b.setPointerCapture(e.pointerId);
             } catch (_) {}
@@ -870,12 +1011,7 @@
           });
           h.addEventListener('dblclick', (e) => {
             e.stopPropagation();
-            checkpoint();
-            if (!w.bends.length) return;
-            w.bends.splice(i, 1);
-            render();
-            properties();
-            persist();
+            deleteCorner();
           });
           g.append(h);
         });
@@ -933,24 +1069,32 @@
             finishWireSketch({ id: d.id, i, x: pt.x, y: pt.y });
             return;
           }
+          const resumeCorners =
+            wireSketch && wireSketch.from && wireSketch.from.id === from.id && wireSketch.from.i === from.i
+              ? (wireSketch.corners || []).slice()
+              : [];
+          wireSketch = null;
+          updateWireDoneBtn();
           drag = {
             kind: 'wire',
             from,
             cur: { x: pt.x, y: pt.y },
             hover: null,
-            path: [{ x: pt.x, y: pt.y }],
+            corners: resumeCorners,
             route,
             moved: false,
             pointerType: e.pointerType,
             startClientX: e.clientX,
-            startClientY: e.clientY
+            startClientY: e.clientY,
+            holdTimer: null,
+            lastHoldPt: null
           };
           try {
             b.setPointerCapture(e.pointerId);
           } catch (_) {}
           $('status').textContent =
             route === 'free'
-              ? 'ลากอิสระตามนิ้ว · ปล่อยที่ขั้วเพื่อเชื่อม หรือปล่อยว่าง = ปลายอิสระ'
+              ? 'ลากเส้นตรง · ค้าง ~0.4วิ หรือปล่อยแล้วแตะเพื่อวางมุม · ปล่อยที่ขั้ว = เชื่อม'
               : 'ลากไปยังขั้วปลายทาง หรือปล่อยว่าง';
           properties();
           render();
@@ -1039,17 +1183,17 @@
   function finishWireSketch(end) {
     if (!wireSketch || !wireSketch.from) return;
     const from = wireSketch.from;
-    const points = (wireSketch.points || []).map((p) => ({ x: Math.round(p.x), y: Math.round(p.y) }));
+    const corners = (wireSketch.corners || wireSketch.points || []).map((p) => ({ x: Math.round(p.x), y: Math.round(p.y) }));
     const route = currentRoute();
     let b;
     let bends = [];
     if (end && end.id != null) {
       b = { id: end.id, i: end.i };
-      bends = points;
-    } else if (points.length) {
-      const last = points[points.length - 1];
+      bends = corners;
+    } else if (corners.length) {
+      const last = corners[corners.length - 1];
       b = { free: true, x: last.x, y: last.y };
-      bends = points.slice(0, -1);
+      bends = corners.slice(0, -1);
     } else {
       wireSketch = null;
       updateWireDoneBtn();
@@ -1059,15 +1203,7 @@
     }
     if (route === 'straight') bends = [];
     else if (route === 'vhv' || route === 'hvh') bends = defaultBends(resolveEnd(from), resolveEnd(b), route);
-    else {
-      const a0 = resolveEnd(from);
-      const b0 = resolveEnd(b);
-      let pts = dedupePts([a0, ...bends, b0]);
-      pts = ramerDouglasPeucker(pts, RDP_EPS);
-      if (pts.length && a0 && Math.hypot(pts[0].x - a0.x, pts[0].y - a0.y) < 2) pts = pts.slice(1);
-      if (pts.length && b0 && Math.hypot(pts[pts.length - 1].x - b0.x, pts[pts.length - 1].y - b0.y) < 2) pts = pts.slice(0, -1);
-      bends = pts;
-    }
+    else bends = cleanCorners(resolveEnd(from), bends, resolveEnd(b));
     checkpoint();
     state().wires.push({
       id: crypto.randomUUID(),
@@ -1082,7 +1218,7 @@
     selected = null;
     wireSketch = null;
     updateWireDoneBtn();
-    $('status').textContent = b.free ? 'วางสายปลายอิสระแล้ว' : 'เชื่อมสายแล้ว · ลากจุดได้';
+    $('status').textContent = b.free ? 'วางสายปลายอิสระแล้ว' : 'เชื่อมสายแล้ว · ลากมุมได้';
     render();
     properties();
     persist();
@@ -1095,7 +1231,18 @@
     btn.hidden = !show;
   }
 
-  function createWireFromDrag(from, to, pathPts, route) {
+  /** Drop near-colinear corners so segments stay meaningfully angled. */
+  function cleanCorners(start, corners, end) {
+    let pts = dedupePts([start, ...(corners || []), end]);
+    if (pts.length <= 2) return [];
+    pts = ramerDouglasPeucker(pts, 5);
+    if (pts.length && start && Math.hypot(pts[0].x - start.x, pts[0].y - start.y) < 2) pts = pts.slice(1);
+    if (pts.length && end && Math.hypot(pts[pts.length - 1].x - end.x, pts[pts.length - 1].y - end.y) < 2) pts = pts.slice(0, -1);
+    return pts;
+  }
+
+  /** Create wire from drag: `corners` are polyline bend points (straight segments). */
+  function createWireFromDrag(from, to, corners, route) {
     const a = resolveEnd(from);
     if (!a) return;
     const r = normalizeRoute(route);
@@ -1112,13 +1259,7 @@
     } else if (r === 'vhv' || r === 'hvh') {
       bends = defaultBends(a, resolveEnd(b), r);
     } else {
-      // free: use sampled path, RDP simplify, drop endpoints
-      let pts = dedupePts(pathPts && pathPts.length ? pathPts : [a, resolveEnd(b)]);
-      pts = ramerDouglasPeucker(pts, RDP_EPS);
-      if (pts.length && Math.hypot(pts[0].x - a.x, pts[0].y - a.y) < 3) pts = pts.slice(1);
-      const be = resolveEnd(b);
-      if (pts.length && be && Math.hypot(pts[pts.length - 1].x - be.x, pts[pts.length - 1].y - be.y) < 3) pts = pts.slice(0, -1);
-      bends = pts;
+      bends = cleanCorners(a, corners || [], resolveEnd(b));
     }
     checkpoint();
     state().wires.push({
@@ -1134,7 +1275,28 @@
     selected = null;
     wireSketch = null;
     updateWireDoneBtn();
-    $('status').textContent = b.free ? 'วางสายปลายอิสระแล้ว · ลากปลาย/จุดได้' : 'เชื่อมสายอิสระแล้ว · ลากจุดได้';
+    $('status').textContent = b.free ? 'วางสายปลายอิสระแล้ว · ลากปลาย/มุมได้' : 'เชื่อมสายแล้ว · ลากมุมได้';
+  }
+
+  function clearWireHoldTimer(d) {
+    if (d && d.holdTimer) {
+      clearTimeout(d.holdTimer);
+      d.holdTimer = null;
+    }
+  }
+
+  function dropWireCorner(d, pt) {
+    if (!d || d.kind !== 'wire') return;
+    const anchor = lastCornerAnchor(d.from, d.corners);
+    const snapped = snapSegmentPoint(anchor, pt, false);
+    const last = d.corners[d.corners.length - 1];
+    if (last && Math.hypot(last.x - snapped.x, last.y - snapped.y) < 4) return;
+    const start = resolveEnd(d.from);
+    if (start && !d.corners.length && Math.hypot(start.x - snapped.x, start.y - snapped.y) < 4) return;
+    d.corners.push(snapped);
+    d.cur = snapped;
+    d.lastHoldPt = snapped;
+    $('status').textContent = `วางมุม ${d.corners.length} · ลากต่อ / ค้างวางมุม / ปล่อยที่ขั้ว`;
   }
 
   function addDevice(type, x, y, skipCheckpoint) {
@@ -1234,21 +1396,43 @@
     } else if (drag.kind === 'wire') {
       // two-finger → cancel into pinch (handled by pinch listener)
       if (pointers.size >= 2) return;
-      drag.cur = pt;
+      const route = normalizeRoute(drag.route || currentRoute());
+      const anchor = lastCornerAnchor(drag.from, drag.corners || []);
+      let cur = pt;
+      if (route === 'free') cur = snapSegmentPoint(anchor, pt, false);
+      else if (route === 'straight') cur = pt;
+      drag.cur = cur;
       drag.hover = findTerminalAt(pt, drag.from);
       if (Math.hypot(e.clientX - (drag.startClientX || 0), e.clientY - (drag.startClientY || 0)) > MOVE_THRESH) drag.moved = true;
-      const route = normalizeRoute(drag.route || currentRoute());
-      if (route === 'free' && drag.path) {
-        const last = drag.path[drag.path.length - 1];
-        if (!last || Math.hypot(last.x - pt.x, last.y - pt.y) >= WIRE_SAMPLE) {
-          drag.path.push({ x: pt.x, y: pt.y });
+
+      // Pause/hold (~400ms truly still) drops a corner, then rubber-band continues
+      if (route === 'free' && drag.moved) {
+        if (!drag.stillSince || Math.hypot(cur.x - drag.stillSince.x, cur.y - drag.stillSince.y) > 5) {
+          drag.stillSince = { x: cur.x, y: cur.y, t: Date.now() };
+          clearWireHoldTimer(drag);
+          drag.holdTimer = setTimeout(() => {
+            if (!drag || drag.kind !== 'wire') return;
+            const s = drag.stillSince;
+            const c = drag.cur;
+            if (!s || !c || Math.hypot(c.x - s.x, c.y - s.y) > 5) return;
+            if (Date.now() - s.t < CORNER_HOLD_MS - 20) return;
+            dropWireCorner(drag, c);
+            drag.stillSince = { x: c.x, y: c.y, t: Date.now() };
+            render();
+          }, CORNER_HOLD_MS);
         }
       }
       render();
     } else if (drag.kind === 'bend') {
       const w = state().wires.find((x) => x.id === drag.wireId);
       if (!w || !w.bends[drag.index]) return;
-      w.bends[drag.index] = { x: Math.round(pt.x), y: Math.round(pt.y) };
+      if (drag._holdClear && Math.hypot(e.clientX - (drag.startX || 0), e.clientY - (drag.startY || 0)) > MOVE_THRESH) {
+        drag.moved = true;
+        drag._holdClear();
+      }
+      const prev = w.bends[drag.index - 1] || resolveEnd(w.a);
+      const snapped = snapSegmentPoint(prev || { x: pt.x, y: pt.y }, pt, false);
+      w.bends[drag.index] = snapped;
       if (normalizeRoute(w.route) === 'straight') w.route = 'free';
       // drag off far → mark remove
       drag.remove = pt.x < -20 || pt.y < -20 || pt.x > cabinet().width + 20 || pt.y > cabinet().height + 20;
@@ -1341,33 +1525,42 @@
       drag = null;
       render();
     } else if (kind === 'wire') {
+      clearWireHoldTimer(drag);
       const from = drag.from;
       const moved = drag.moved;
-      const path = (drag.path || []).slice();
+      const corners = (drag.corners || []).slice();
       const route = normalizeRoute(drag.route || currentRoute());
       const pt = point(e);
+      const rubber = drag.cur || pt;
       const toTerm = drag.hover || findTerminalAt(pt, from);
       drag = null;
       if (!moved) {
-        // Tap on terminal → start or continue tap-by-tap sketch
-        if (wireSketch && wireSketch.from && !(wireSketch.from.id === from.id && wireSketch.from.i === from.i)) {
-          finishWireSketch(from);
-        } else {
-          wireSketch = { from, points: [], lastTapMs: Date.now() };
-          updateWireDoneBtn();
-          $('status').textContent = 'แตะผ้าใบเพิ่มจุด · แตะขั้วปลายทางเพื่อเชื่อม · ดับเบิลแตะ/เสร็จ = จบ';
-          render();
-          properties();
-        }
+        // Tap on terminal → start tap-by-tap sketch
+        wireSketch = { from, corners: [], lastTapMs: Date.now() };
+        updateWireDoneBtn();
+        $('status').textContent = 'แตะผ้าใบวางมุม · แตะขั้วปลายทางเพื่อเชื่อม · ดับเบิลแตะ/เสร็จ = จบ';
+        render();
+        properties();
       } else if (toTerm && !(toTerm.id === from.id && toTerm.i === from.i)) {
-        createWireFromDrag(from, toTerm, path, route);
+        createWireFromDrag(from, toTerm, corners, route);
         persist();
         render();
         properties();
+      } else if (moved && route === 'free') {
+        // Lift-and-tap: drop corner at release, continue as sketch (don't finish free-end yet)
+        const anchor = lastCornerAnchor(from, corners);
+        const snapped = snapSegmentPoint(anchor, rubber, false);
+        const next = corners.slice();
+        const last = next[next.length - 1];
+        if (!last || Math.hypot(last.x - snapped.x, last.y - snapped.y) >= 4) next.push(snapped);
+        wireSketch = { from, corners: next, lastTapMs: Date.now() };
+        updateWireDoneBtn();
+        $('status').textContent = `มุม ${next.length} · แตะวางมุมต่อ / ลากต่อ / แตะขั้วหรือเสร็จ`;
+        render();
+        properties();
       } else if (moved) {
-        // Free-ending wire at release point
-        const last = path.length ? path[path.length - 1] : pt;
-        createWireFromDrag(from, { free: true, x: last.x, y: last.y }, path, route);
+        // ortho/straight: free-ending at release
+        createWireFromDrag(from, { free: true, x: Math.round(rubber.x), y: Math.round(rubber.y) }, corners, route);
         persist();
         render();
         properties();
@@ -1377,10 +1570,11 @@
         properties();
       }
     } else if (kind === 'bend') {
+      if (drag._holdClear) drag._holdClear();
       const w = state().wires.find((x) => x.id === drag.wireId);
       if (w && drag.remove && w.bends.length) {
         w.bends.splice(drag.index, 1);
-        $('status').textContent = 'ลบจุดแล้ว';
+        $('status').textContent = 'ลบมุมแล้ว';
       }
       drag = null;
       render();
@@ -1763,7 +1957,7 @@
     }
     $('status').textContent =
       tName === 'wire'
-        ? 'โหมดสายอิสระ: ลากจากขั้วตามนิ้ว · หรือแตะทีละจุด · สองนิ้วเลื่อน/ซูม'
+        ? 'โหมดสาย: เส้นตรงทีละช่วง · ค้าง/แตะวางมุม · Shift หรือ ∠45° · สองนิ้วเลื่อน/ซูม'
         : 'ลากอุปกรณ์/ราง · ลากขั้วเพื่อเดินสาย · ลากพื้นว่างเพื่อเลื่อนมุมมอง';
   }
 
@@ -1778,7 +1972,7 @@
       e.target === board;
     if (!empty) return;
 
-    // Tap-by-tap: add bend / double-tap finish
+    // Tap-by-tap: add corner / double-tap finish
     if (tool === 'wire' && wireSketch && wireSketch.from && pointers.size < 2) {
       const pt = point(e);
       const term = findTerminalAt(pt, wireSketch.from);
@@ -1787,14 +1981,17 @@
         return;
       }
       const now = Date.now();
-      if (now - (wireSketch.lastTapMs || 0) < 320 && wireSketch.points.length) {
+      const corners = wireSketch.corners || (wireSketch.corners = []);
+      if (now - (wireSketch.lastTapMs || 0) < 320 && corners.length) {
         finishWireSketch(null);
         return;
       }
-      wireSketch.points.push({ x: Math.round(pt.x), y: Math.round(pt.y) });
+      const anchor = lastCornerAnchor(wireSketch.from, corners);
+      const snapped = snapSegmentPoint(anchor, pt, false);
+      corners.push(snapped);
       wireSketch.lastTapMs = now;
       updateWireDoneBtn();
-      $('status').textContent = `จุด ${wireSketch.points.length} · แตะขั้วปลาย / ดับเบิลแตะ / เสร็จ`;
+      $('status').textContent = `มุม ${corners.length} · แตะขั้วปลาย / ดับเบิลแตะ / เสร็จ`;
       render();
       return;
     }
@@ -1883,6 +2080,17 @@
   $('wire-done').onclick = () => {
     if (wireSketch) finishWireSketch(null);
   };
+  $('angle-snap').onclick = () => {
+    angleSnapOn = !angleSnapOn;
+    $('angle-snap').classList.toggle('active', angleSnapOn);
+    $('status').textContent = angleSnapOn ? 'ล็อกมุม 0°/45°/90° เปิด' : 'ล็อกมุมปิด (ใกล้แกนยัง snap ±3°)';
+  };
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Shift') shiftHeld = true;
+  });
+  document.addEventListener('keyup', (e) => {
+    if (e.key === 'Shift') shiftHeld = false;
+  });
   $('ac').onclick = () => setMode('AC');
   $('dc').onclick = () => setMode('DC');
   $('undo').onclick = undo;

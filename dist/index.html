@@ -142,6 +142,9 @@ svg#board{
 .stage-wrap.wire-mode .stage-scroll{touch-action:none;overflow:hidden}
 .free-end{cursor:grab;fill:#fff;stroke:#f0aa31;stroke-width:2}
 .wire-sketch-dot{fill:#0a6b5c;stroke:#fff;stroke-width:1.5;pointer-events:none}
+.mid-handle{cursor:copy;fill:#fff;stroke:#6a7c86;stroke-width:1.5;opacity:.85}
+.mid-handle:hover{opacity:1;stroke:#0a6b5c}
+#angle-snap.active{background:var(--brand);color:#fff;border-color:var(--brand)}
 .status{min-height:28px;color:var(--brand);font-size:12px;margin-top:6px;flex-shrink:0}
 .hint{color:var(--muted);font-size:11px;margin-top:4px;flex-shrink:0}
 .legend{display:flex;flex-wrap:wrap;gap:10px;font-size:11px;margin-top:6px;color:var(--muted);flex-shrink:0}
@@ -376,6 +379,7 @@ footer.panel-foot{font-size:10px;color:var(--muted);margin-top:16px;line-height:
         <option value="hvh">H–V</option>
         <option value="straight">ตรง</option>
       </select>
+      <button type="button" id="angle-snap" title="ล็อกมุม 0°/45°/90° (หรือกด Shift)">∠ 45°</button>
       <button type="button" id="wire-done" hidden title="จบการวาดสาย">✓ เสร็จ</button>
       <button type="button" id="undo" title="Ctrl+Z">↶ ย้อน</button>
       <button type="button" id="redo" title="Ctrl+Y" disabled>↷ ทำซ้ำ</button>
@@ -406,7 +410,7 @@ footer.panel-foot{font-size:10px;color:var(--muted);margin-top:16px;line-height:
     </div>
     <div class="legend" id="legend"></div>
     <div class="status" id="status" aria-live="polite">ลากอุปกรณ์จากแคตตาล็อกลงตู้ · ลากสายอิสระจากขั้ว</div>
-    <div class="hint">ลากสายอิสระตามนิ้ว · แตะทีละจุด · V–H/H–V/ตรง · สองนิ้วเลื่อน/ซูม · Ctrl+Z/Y · ลากลงถังเพื่อลบ</div>
+    <div class="hint">สายอิสระ = เส้นตรงทีละช่วง · หยุดค้าง/แตะวางมุม · Shift หรือ ∠45° ล็อกมุม · สองนิ้วเลื่อน/ซูม</div>
   </main>
 
   <aside class="panel panel-right" id="panel-props" data-panel="props">
