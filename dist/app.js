@@ -1,13 +1,17 @@
-/* Panel Studio v4 — full drag-drop · wire drag · pan/zoom · real-scale */
+/* Panel Studio v5 — freehand wires · drag-drop · pan/zoom · real-scale */
 (() => {
   const $ = (id) => document.getElementById(id);
   const NS = 'http://www.w3.org/2000/svg';
   const C = window.PANEL_CATALOG;
   const MODULE = C.MODULE_MM;
   const STORAGE = 'panel-studio-v1';
-  const VERSION = 4;
+  const VERSION = 5;
   const LONG_PRESS_MS = 380;
   const MOVE_THRESH = 8;
+  const WIRE_SAMPLE = 4;
+  const RDP_EPS = 3.5;
+  const TERM_SNAP = 22;
+  const ROUTES = ['free', 'vhv', 'hvh', 'straight'];
 
   const WIRE_COLORS = {
     AC: [
@@ -67,6 +71,7 @@
   let ghostEl = null;
   let lastBendTap = 0;
   let pointers = new Map();
+  let wireSketch = null; // tap-by-tap: { from, points, lastTapMs }
 
   /* —— Catalog helpers —— */
   const devicesFor = (m) => C.devices.filter((d) => d.modes.includes(m));
@@ -209,22 +214,40 @@
   }
 
   /* —— Persistence —— */
+  function normalizeRoute(r) {
+    if (ROUTES.includes(r)) return r;
+    if (r === 'ortho' || r === 'vh') return 'vhv';
+    if (r === 'hv') return 'hvh';
+    return 'free';
+  }
+  function normalizeEnd(e, devices) {
+    if (!e || typeof e !== 'object') return null;
+    if (e.free || (e.id == null && Number.isFinite(e.x) && Number.isFinite(e.y))) {
+      return { free: true, x: Math.round(e.x), y: Math.round(e.y) };
+    }
+    if (typeof e.id === 'string' && Number.isInteger(e.i) && e.i >= 0 && e.i < 16 && devices.some((x) => x.id === e.id)) {
+      return { id: e.id, i: e.i };
+    }
+    return null;
+  }
   function normalizeWire(w, devices) {
     if (!w || typeof w.id !== 'string' || !/^#[0-9a-f]{6}$/i.test(w.color)) return null;
-    const ok = (e) =>
-      e && typeof e.id === 'string' && Number.isInteger(e.i) && e.i >= 0 && e.i < 16 && devices.some((x) => x.id === e.id);
-    if (!ok(w.a) || !ok(w.b)) return null;
+    const a = normalizeEnd(w.a, devices);
+    const b = normalizeEnd(w.b, devices);
+    if (!a || !b) return null;
+    // at least one end should be a terminal (orphan free–free discarded)
+    if (a.free && b.free) return null;
     const bends = Array.isArray(w.bends)
-      ? w.bends.filter((b) => b && Number.isFinite(b.x) && Number.isFinite(b.y)).slice(0, 40).map((b) => ({ x: Math.round(b.x), y: Math.round(b.y) }))
+      ? w.bends.filter((p) => p && Number.isFinite(p.x) && Number.isFinite(p.y)).slice(0, 80).map((p) => ({ x: Math.round(p.x), y: Math.round(p.y) }))
       : [];
     const width = Number(w.width);
     return {
       id: w.id,
-      a: { id: w.a.id, i: w.a.i },
-      b: { id: w.b.id, i: w.b.i },
+      a,
+      b,
       color: w.color,
       width: Number.isFinite(width) ? Math.max(1, Math.min(8, width)) : 2.5,
-      route: w.route === 'hvh' ? 'hvh' : 'vhv',
+      route: normalizeRoute(w.route),
       bends
     };
   }
@@ -415,13 +438,28 @@
       return { x, y, label, top };
     });
   }
-  function endpoint(e) {
+  function isFreeEnd(e) {
+    return !!(e && (e.free || (e.id == null && Number.isFinite(e.x) && Number.isFinite(e.y))));
+  }
+  function resolveEnd(e) {
+    if (!e) return null;
+    if (isFreeEnd(e)) return { x: e.x, y: e.y, free: true };
     const d = state().devices.find((x) => x.id === e.id);
-    return d && ports(d)[e.i];
+    const p = d && ports(d)[e.i];
+    return p ? { x: p.x, y: p.y, free: false, id: e.id, i: e.i } : null;
+  }
+  function endpoint(e) {
+    return resolveEnd(e);
+  }
+  function currentRoute() {
+    return normalizeRoute($('wire-route').value);
   }
   function defaultBends(a, b, route) {
-    if (!a || !b || Math.abs(a.x - b.x) < 1 || Math.abs(a.y - b.y) < 1) return [];
-    if (route === 'hvh') {
+    if (!a || !b) return [];
+    const r = normalizeRoute(route);
+    if (r === 'free' || r === 'straight') return [];
+    if (Math.abs(a.x - b.x) < 1 || Math.abs(a.y - b.y) < 1) return [];
+    if (r === 'hvh') {
       const mx = Math.round((a.x + b.x) / 2);
       return [
         { x: mx, y: a.y },
@@ -438,11 +476,54 @@
     if (a.x === b.x || a.y === b.y) return [];
     return prefer === 'hvh' ? [{ x: b.x, y: a.y }] : [{ x: a.x, y: b.y }];
   }
+  function dedupePts(pts) {
+    const out = [];
+    pts.forEach((p) => {
+      if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y)) return;
+      const last = out[out.length - 1];
+      if (last && Math.hypot(last.x - p.x, last.y - p.y) < 0.5) return;
+      out.push({ x: Math.round(p.x), y: Math.round(p.y) });
+    });
+    return out;
+  }
+  function perpDist(p, a, b) {
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    if (dx === 0 && dy === 0) return Math.hypot(p.x - a.x, p.y - a.y);
+    const t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / (dx * dx + dy * dy);
+    const qx = a.x + t * dx;
+    const qy = a.y + t * dy;
+    return Math.hypot(p.x - qx, p.y - qy);
+  }
+  function ramerDouglasPeucker(points, epsilon) {
+    if (!points || points.length < 3) return (points || []).slice();
+    let maxD = 0;
+    let idx = 0;
+    const end = points.length - 1;
+    for (let i = 1; i < end; i++) {
+      const d = perpDist(points[i], points[0], points[end]);
+      if (d > maxD) {
+        maxD = d;
+        idx = i;
+      }
+    }
+    if (maxD > epsilon) {
+      const left = ramerDouglasPeucker(points.slice(0, idx + 1), epsilon);
+      const right = ramerDouglasPeucker(points.slice(idx), epsilon);
+      return left.slice(0, -1).concat(right);
+    }
+    return [points[0], points[end]];
+  }
   function wirePolyline(w) {
-    const a = endpoint(w.a);
-    const b = endpoint(w.b);
+    const a = resolveEnd(w.a);
+    const b = resolveEnd(w.b);
     if (!a || !b) return [];
-    const route = w.route === 'hvh' ? 'hvh' : 'vhv';
+    const route = normalizeRoute(w.route);
+    if (route === 'straight') return dedupePts([a, b]);
+    if (route === 'free') {
+      const mids = (w.bends || []).map((p) => ({ x: p.x, y: p.y }));
+      return dedupePts([a, ...mids, b]);
+    }
     const mids = w.bends && w.bends.length ? w.bends : defaultBends(a, b, route);
     const keys = [{ x: a.x, y: a.y }, ...mids.map((p) => ({ x: p.x, y: p.y })), { x: b.x, y: b.y }];
     const out = [keys[0]];
@@ -463,7 +544,27 @@
   }
   function pathD(pts) {
     if (pts.length < 2) return '';
-    return pts.map((p, i) => `${i ? 'L' : 'M'}${p.x},${p.y}`).join(' ');
+    return pts.map((p, i) => `${i ? 'L' : 'M'}${Math.round(p.x)},${Math.round(p.y)}`).join(' ');
+  }
+  function previewPath(a, to, route, freePath) {
+    const r = normalizeRoute(route);
+    if (r === 'free') {
+      const pts = freePath && freePath.length ? freePath : [a, to];
+      return pathD(dedupePts([...pts, to]));
+    }
+    if (r === 'straight') return pathD([a, to]);
+    const bends = defaultBends(a, to, r);
+    return pathD([a, ...bends, to]);
+  }
+  function wireTouchesDevice(w, id) {
+    return (w.a && w.a.id === id) || (w.b && w.b.id === id);
+  }
+  function termSnapRadius() {
+    return window.matchMedia('(max-width:900px)').matches ? TERM_SNAP + 8 : TERM_SNAP;
+  }
+  function terminalRadius(t) {
+    const base = Math.max(7, Math.min(11, Math.max(deviceWidth(t), deviceHeight(t)) / 10));
+    return window.matchMedia('(max-width:900px)').matches ? Math.max(base, 12) : base;
   }
   function bringDeviceFront(id) {
     const arr = state().devices;
@@ -518,8 +619,11 @@
     if (d) {
       const t = spec(d.type);
       $('float-label').textContent = d.label + (t ? ` · ${deviceWidth(t)}×${deviceHeight(t)} มม.` : '');
-    } else if (w) $('float-label').textContent = `สาย · มุม ${w.bends.length}`;
-    else $('float-label').textContent = '—';
+    } else if (w) {
+      const r = normalizeRoute(w.route);
+      const label = { free: 'อิสระ', vhv: 'V–H', hvh: 'H–V', straight: 'ตรง' }[r] || r;
+      $('float-label').textContent = `สาย · ${label} · จุด ${w.bends.length}${isFreeEnd(w.a) || isFreeEnd(w.b) ? ' · ปลายอิสระ' : ''}`;
+    } else $('float-label').textContent = '—';
   }
   function properties() {
     const d = selected && state().devices.find((x) => x.id === selected);
@@ -538,8 +642,8 @@
     if (w) {
       fillColorSelect($('wprop-color'), w.color);
       $('wprop-size').value = String(w.width);
-      $('wprop-route').value = w.route || 'vhv';
-      $('wprop-info').textContent = `จุดเลี้ยว ${w.bends.length} · ลากจากขั้วเพื่อเดินสาย · ลากมุมเพื่อจัดเส้น`;
+      $('wprop-route').value = normalizeRoute(w.route);
+      $('wprop-info').textContent = `แนว ${$('wprop-route').selectedOptions[0]?.text || ''} · จุด ${w.bends.length} · ลากจุด/ปลายอิสระได้`;
     }
     updateSelActions();
   }
@@ -616,17 +720,23 @@
       b.append(g);
     });
 
-    // Live wire preview
+    // Live wire preview (freehand / routed)
     if (drag && drag.kind === 'wire' && drag.from) {
-      const a = endpoint(drag.from);
+      const a = resolveEnd(drag.from);
       if (a) {
         const to = drag.hover || drag.cur || a;
-        const preview = defaultBends(a, to, $('wire-route').value === 'hvh' ? 'hvh' : 'vhv');
-        const pts = [{ x: a.x, y: a.y }, ...preview, { x: to.x, y: to.y }];
-        // simplify path
-        const d = pathD([a, ...orthCorner(a, to, $('wire-route').value), to].filter(Boolean));
-        const simple = a.x === to.x || a.y === to.y ? `M${a.x},${a.y} L${to.x},${to.y}` : `M${a.x},${a.y} L${a.x},${to.y} L${to.x},${to.y}`;
-        b.append(el('path', { d: simple, fill: 'none', stroke: $('color').value, 'stroke-width': 2.5, 'stroke-dasharray': '6 4', opacity: 0.85, 'pointer-events': 'none' }));
+        const d = previewPath(a, to, drag.route || currentRoute(), drag.path);
+        b.append(el('path', { d, fill: 'none', stroke: $('color').value, 'stroke-width': 2.5, 'stroke-dasharray': '5 4', opacity: 0.9, 'pointer-events': 'none', 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
+        if (drag.hover) b.append(el('circle', { cx: drag.hover.x, cy: drag.hover.y, r: 10, fill: '#f0aa31', stroke: '#0a6b5c', 'stroke-width': 2, 'pointer-events': 'none' }));
+      }
+    }
+    // Tap-by-tap sketch preview
+    if (wireSketch && wireSketch.from) {
+      const a = resolveEnd(wireSketch.from);
+      if (a) {
+        const pts = [a, ...(wireSketch.points || [])];
+        if (pts.length >= 2) b.append(el('path', { d: pathD(pts), fill: 'none', stroke: $('color').value, 'stroke-width': 2.2, 'stroke-dasharray': '4 3', opacity: 0.85, 'pointer-events': 'none' }));
+        pts.forEach((p, i) => b.append(el('circle', { cx: p.x, cy: p.y, r: i === 0 ? 6 : 4, class: 'wire-sketch-dot' })));
       }
     }
 
@@ -647,12 +757,17 @@
       const isSel = selected === d.id;
       const pad = Math.max(2, Math.min(6, 24 - Math.min(w, h) / 2));
       const hit = el('rect', { x: d.x - pad, y: d.y - pad, width: w + pad * 2, height: h + pad * 2, fill: 'transparent', class: 'device-hit' });
+      const labelFs = Math.max(7, Math.min(10, w / 5.5));
+      const ratingFs = Math.max(6, Math.min(8, w / 6.5));
+      const labelY = d.y + Math.min(12, h * 0.32);
+      const ratingY = d.y + h - Math.max(5, Math.min(8, h * 0.12));
+      // keep label/rating clear of terminal zones (top/bottom edges)
       g.append(
         hit,
         el('rect', { x: d.x, y: d.y, width: w, height: h, rx: 3, fill: '#fff', stroke: isSel ? '#0a6b5c' : '#8a9ba4', 'stroke-width': isSel ? 2.5 : 1.2 }),
-        el('rect', { x: d.x + 4, y: d.y + h * 0.35, width: Math.max(2, w - 8), height: Math.max(10, h * 0.22), rx: 2, fill: t.isBar ? '#b89a4e' : '#243842' }),
-        el('text', { x: d.x + w / 2, y: d.y + Math.min(14, h * 0.28), 'text-anchor': 'middle', 'font-size': Math.max(7, Math.min(11, w / 5)), fill: '#1a3038' }, d.label.slice(0, 14)),
-        el('text', { x: d.x + w / 2, y: d.y + h - 6, 'text-anchor': 'middle', 'font-size': Math.max(6, Math.min(9, w / 6)), fill: '#6d7f88' }, d.rating.slice(0, 16))
+        el('rect', { x: d.x + 3, y: d.y + h * 0.38, width: Math.max(2, w - 6), height: Math.max(8, h * 0.2), rx: 2, fill: t.isBar ? '#b89a4e' : '#243842' }),
+        el('text', { x: d.x + w / 2, y: labelY, 'text-anchor': 'middle', 'font-size': labelFs, fill: '#1a3038' }, (d.label || '').slice(0, w < 28 ? 4 : 10)),
+        el('text', { x: d.x + w / 2, y: ratingY, 'text-anchor': 'middle', 'font-size': ratingFs, fill: '#6d7f88' }, (d.rating || '').slice(0, w < 28 ? 4 : 12))
       );
       g.querySelectorAll('rect:not(.device-hit), text').forEach((n) => {
         n.style.pointerEvents = 'none';
@@ -660,6 +775,7 @@
 
       hit.addEventListener('pointerdown', (e) => {
         e.stopPropagation();
+        if (tool === 'wire') return; // terminals handle wiring; body ignores in wire mode
         selectedWire = null;
         selected = d.id;
         bringDeviceFront(d.id);
@@ -686,9 +802,21 @@
         render();
       });
 
-      ports(d).forEach((pt) => {
-        g.append(el('text', { x: pt.x, y: pt.y + (pt.top ? 11 : -5), 'text-anchor': 'middle', 'font-size': Math.max(6, Math.min(9, w / (t.poles + 2))), fill: '#6a7c86', style: 'pointer-events:none' }, pt.label));
-      });
+      // Port labels only when selected — avoids overlap with body text / terminals
+      if (isSel) {
+        ports(d).forEach((pt) => {
+          g.append(
+            el('text', {
+              x: pt.x,
+              y: pt.y + (pt.top ? -8 : 14),
+              'text-anchor': 'middle',
+              'font-size': 8,
+              fill: '#0a6b5c',
+              style: 'pointer-events:none'
+            }, pt.label)
+          );
+        });
+      }
       b.append(g);
     });
 
@@ -722,13 +850,18 @@
       });
       g.append(hit);
       if (active) {
-        const handles = w.bends.length ? w.bends : defaultBends(endpoint(w.a), endpoint(w.b), w.route || 'vhv');
+        const route = normalizeRoute(w.route);
+        let handles = w.bends.slice();
+        if (!handles.length && (route === 'vhv' || route === 'hvh')) {
+          handles = defaultBends(resolveEnd(w.a), resolveEnd(w.b), route);
+        }
         handles.forEach((bp, i) => {
           const h = el('circle', { cx: bp.x, cy: bp.y, r: 8, class: 'bend-handle' });
           h.addEventListener('pointerdown', (e) => {
             e.stopPropagation();
             checkpoint();
             if (!w.bends.length) w.bends = handles.map((p) => ({ x: p.x, y: p.y }));
+            if (route === 'straight') w.route = 'free';
             drag = { kind: 'bend', wireId: w.id, index: i };
             try {
               b.setPointerCapture(e.pointerId);
@@ -746,6 +879,21 @@
           });
           g.append(h);
         });
+        // Free endpoint handle
+        [w.a, w.b].forEach((end, ei) => {
+          if (!isFreeEnd(end)) return;
+          const h = el('circle', { cx: end.x, cy: end.y, r: 9, class: 'free-end', 'data-end': ei === 0 ? 'a' : 'b' });
+          h.addEventListener('pointerdown', (e) => {
+            e.stopPropagation();
+            checkpoint();
+            drag = { kind: 'free-end', wireId: w.id, which: ei === 0 ? 'a' : 'b' };
+            try {
+              b.setPointerCapture(e.pointerId);
+            } catch (_) {}
+            render();
+          });
+          g.append(h);
+        });
       }
       b.append(g);
     });
@@ -755,12 +903,14 @@
       const t = spec(d.type);
       if (!t) return;
       ports(d).forEach((pt, i) => {
-        const hot = drag && drag.kind === 'wire' && drag.hover && drag.hover.id === d.id && drag.hover.i === i;
-        const r = Math.max(7, Math.min(10, Math.max(deviceWidth(t), deviceHeight(t)) / 10));
+        const hot =
+          (drag && drag.kind === 'wire' && drag.hover && drag.hover.id === d.id && drag.hover.i === i) ||
+          (wireSketch && wireSketch.from && wireSketch.from.id === d.id && wireSketch.from.i === i);
+        const r = terminalRadius(t);
         const circle = el('circle', {
           cx: pt.x,
           cy: pt.y,
-          r: hot ? r + 2 : r,
+          r: hot ? r + 3 : r,
           fill: hot ? '#f0aa31' : '#dfe6ea',
           stroke: hot ? '#0a6b5c' : '#5a6d77',
           'stroke-width': 1.8,
@@ -768,20 +918,46 @@
           'data-dev': d.id,
           'data-port': String(i)
         });
-        circle.addEventListener('pointerdown', (e) => {
+        // Invisible larger hit for touch
+        const hitR = Math.max(r + 6, termSnapRadius() * 0.55);
+        const hitC = el('circle', { cx: pt.x, cy: pt.y, r: hitR, fill: 'transparent', class: 'terminal-hit', 'data-dev': d.id, 'data-port': String(i) });
+        const startWire = (e) => {
           e.stopPropagation();
-          checkpoint();
+          e.preventDefault();
           selected = null;
           selectedWire = null;
-          drag = { kind: 'wire', from: { id: d.id, i }, cur: { x: pt.x, y: pt.y }, hover: null };
+          const from = { id: d.id, i };
+          const route = currentRoute();
+          // If tap-sketch already started and this is another terminal → finish
+          if (wireSketch && wireSketch.from && !(wireSketch.from.id === d.id && wireSketch.from.i === i)) {
+            finishWireSketch({ id: d.id, i, x: pt.x, y: pt.y });
+            return;
+          }
+          drag = {
+            kind: 'wire',
+            from,
+            cur: { x: pt.x, y: pt.y },
+            hover: null,
+            path: [{ x: pt.x, y: pt.y }],
+            route,
+            moved: false,
+            pointerType: e.pointerType,
+            startClientX: e.clientX,
+            startClientY: e.clientY
+          };
           try {
             b.setPointerCapture(e.pointerId);
           } catch (_) {}
-          $('status').textContent = 'ลากไปยังขั้วปลายทาง';
+          $('status').textContent =
+            route === 'free'
+              ? 'ลากอิสระตามนิ้ว · ปล่อยที่ขั้วเพื่อเชื่อม หรือปล่อยว่าง = ปลายอิสระ'
+              : 'ลากไปยังขั้วปลายทาง หรือปล่อยว่าง';
           properties();
           render();
-        });
-        b.append(circle);
+        };
+        hitC.addEventListener('pointerdown', startWire);
+        circle.addEventListener('pointerdown', startWire);
+        b.append(hitC, circle);
       });
     });
 
@@ -810,7 +986,7 @@
 
   function findTerminalAt(pt, exclude) {
     let best = null;
-    let bestDist = 16;
+    let bestDist = termSnapRadius();
     state().devices.forEach((d) => {
       ports(d).forEach((p, i) => {
         if (exclude && exclude.id === d.id && exclude.i === i) return;
@@ -826,19 +1002,139 @@
 
   function addBendAtPointer(w, pt) {
     checkpoint();
-    const a = endpoint(w.a);
-    const b = endpoint(w.b);
+    const a = resolveEnd(w.a);
+    const b = resolveEnd(w.b);
     if (!a || !b) return;
-    if (!w.bends.length) w.bends = defaultBends(a, b, w.route || 'vhv');
+    const route = normalizeRoute(w.route);
+    if (!w.bends.length && (route === 'vhv' || route === 'hvh')) w.bends = defaultBends(a, b, route);
     const nx = Math.round(pt.x);
     const ny = Math.round(pt.y);
     if (w.bends.some((bp) => Math.hypot(bp.x - nx, bp.y - ny) < 4)) return;
-    w.bends.push({ x: nx, y: ny });
+    // insert nearest segment mid for free routes
+    if (route === 'free' || route === 'straight') {
+      const pts = wirePolyline(w);
+      let bestI = w.bends.length;
+      let bestD = Infinity;
+      for (let i = 0; i < pts.length - 1; i++) {
+        const d = perpDist({ x: nx, y: ny }, pts[i], pts[i + 1]);
+        if (d < bestD) {
+          bestD = d;
+          bestI = Math.max(0, i); // bends index ≈ after start
+        }
+      }
+      // map polyline index to bends index (polyline = a + bends + b)
+      const bi = Math.min(w.bends.length, Math.max(0, bestI));
+      w.bends.splice(bi, 0, { x: nx, y: ny });
+      if (route === 'straight') w.route = 'free';
+    } else {
+      w.bends.push({ x: nx, y: ny });
+    }
     selectedWire = w.id;
     selected = null;
     render();
     properties();
     persist();
+  }
+
+  function finishWireSketch(end) {
+    if (!wireSketch || !wireSketch.from) return;
+    const from = wireSketch.from;
+    const points = (wireSketch.points || []).map((p) => ({ x: Math.round(p.x), y: Math.round(p.y) }));
+    const route = currentRoute();
+    let b;
+    let bends = [];
+    if (end && end.id != null) {
+      b = { id: end.id, i: end.i };
+      bends = points;
+    } else if (points.length) {
+      const last = points[points.length - 1];
+      b = { free: true, x: last.x, y: last.y };
+      bends = points.slice(0, -1);
+    } else {
+      wireSketch = null;
+      updateWireDoneBtn();
+      $('status').textContent = 'ยกเลิกการเดินสาย';
+      render();
+      return;
+    }
+    if (route === 'straight') bends = [];
+    else if (route === 'vhv' || route === 'hvh') bends = defaultBends(resolveEnd(from), resolveEnd(b), route);
+    else {
+      const a0 = resolveEnd(from);
+      const b0 = resolveEnd(b);
+      let pts = dedupePts([a0, ...bends, b0]);
+      pts = ramerDouglasPeucker(pts, RDP_EPS);
+      if (pts.length && a0 && Math.hypot(pts[0].x - a0.x, pts[0].y - a0.y) < 2) pts = pts.slice(1);
+      if (pts.length && b0 && Math.hypot(pts[pts.length - 1].x - b0.x, pts[pts.length - 1].y - b0.y) < 2) pts = pts.slice(0, -1);
+      bends = pts;
+    }
+    checkpoint();
+    state().wires.push({
+      id: crypto.randomUUID(),
+      a: { id: from.id, i: from.i },
+      b,
+      color: $('color').value,
+      width: parseFloat($('wire-size').value) || 2.5,
+      route,
+      bends
+    });
+    selectedWire = state().wires[state().wires.length - 1].id;
+    selected = null;
+    wireSketch = null;
+    updateWireDoneBtn();
+    $('status').textContent = b.free ? 'วางสายปลายอิสระแล้ว' : 'เชื่อมสายแล้ว · ลากจุดได้';
+    render();
+    properties();
+    persist();
+  }
+
+  function updateWireDoneBtn() {
+    const btn = $('wire-done');
+    if (!btn) return;
+    const show = !!(wireSketch && wireSketch.from);
+    btn.hidden = !show;
+  }
+
+  function createWireFromDrag(from, to, pathPts, route) {
+    const a = resolveEnd(from);
+    if (!a) return;
+    const r = normalizeRoute(route);
+    let b;
+    let bends = [];
+    if (to && to.id != null) {
+      b = { id: to.id, i: to.i };
+    } else if (to && (to.free || Number.isFinite(to.x))) {
+      b = { free: true, x: Math.round(to.x), y: Math.round(to.y) };
+    } else return;
+
+    if (r === 'straight') {
+      bends = [];
+    } else if (r === 'vhv' || r === 'hvh') {
+      bends = defaultBends(a, resolveEnd(b), r);
+    } else {
+      // free: use sampled path, RDP simplify, drop endpoints
+      let pts = dedupePts(pathPts && pathPts.length ? pathPts : [a, resolveEnd(b)]);
+      pts = ramerDouglasPeucker(pts, RDP_EPS);
+      if (pts.length && Math.hypot(pts[0].x - a.x, pts[0].y - a.y) < 3) pts = pts.slice(1);
+      const be = resolveEnd(b);
+      if (pts.length && be && Math.hypot(pts[pts.length - 1].x - be.x, pts[pts.length - 1].y - be.y) < 3) pts = pts.slice(0, -1);
+      bends = pts;
+    }
+    checkpoint();
+    state().wires.push({
+      id: crypto.randomUUID(),
+      a: { id: from.id, i: from.i },
+      b,
+      color: $('color').value,
+      width: parseFloat($('wire-size').value) || 2.5,
+      route: r,
+      bends
+    });
+    selectedWire = state().wires[state().wires.length - 1].id;
+    selected = null;
+    wireSketch = null;
+    updateWireDoneBtn();
+    $('status').textContent = b.free ? 'วางสายปลายอิสระแล้ว · ลากปลาย/จุดได้' : 'เชื่อมสายอิสระแล้ว · ลากจุดได้';
   }
 
   function addDevice(type, x, y, skipCheckpoint) {
@@ -936,15 +1232,38 @@
       ensureDomGhost(t.nameTh || t.name, !drag.fit);
       render();
     } else if (drag.kind === 'wire') {
+      // two-finger → cancel into pinch (handled by pinch listener)
+      if (pointers.size >= 2) return;
       drag.cur = pt;
       drag.hover = findTerminalAt(pt, drag.from);
+      if (Math.hypot(e.clientX - (drag.startClientX || 0), e.clientY - (drag.startClientY || 0)) > MOVE_THRESH) drag.moved = true;
+      const route = normalizeRoute(drag.route || currentRoute());
+      if (route === 'free' && drag.path) {
+        const last = drag.path[drag.path.length - 1];
+        if (!last || Math.hypot(last.x - pt.x, last.y - pt.y) >= WIRE_SAMPLE) {
+          drag.path.push({ x: pt.x, y: pt.y });
+        }
+      }
       render();
     } else if (drag.kind === 'bend') {
       const w = state().wires.find((x) => x.id === drag.wireId);
       if (!w || !w.bends[drag.index]) return;
       w.bends[drag.index] = { x: Math.round(pt.x), y: Math.round(pt.y) };
+      if (normalizeRoute(w.route) === 'straight') w.route = 'free';
       // drag off far → mark remove
       drag.remove = pt.x < -20 || pt.y < -20 || pt.x > cabinet().width + 20 || pt.y > cabinet().height + 20;
+      render();
+    } else if (drag.kind === 'free-end') {
+      const w = state().wires.find((x) => x.id === drag.wireId);
+      if (!w) return;
+      const snap = findTerminalAt(pt);
+      if (snap) {
+        w[drag.which] = { id: snap.id, i: snap.i };
+        drag.hover = snap;
+      } else {
+        w[drag.which] = { free: true, x: Math.round(pt.x), y: Math.round(pt.y) };
+        drag.hover = null;
+      }
       render();
     } else if (drag.kind === 'rail') {
       const ys = railYs();
@@ -1023,38 +1342,51 @@
       render();
     } else if (kind === 'wire') {
       const from = drag.from;
-      const to = drag.hover || findTerminalAt(point(e), from);
+      const moved = drag.moved;
+      const path = (drag.path || []).slice();
+      const route = normalizeRoute(drag.route || currentRoute());
+      const pt = point(e);
+      const toTerm = drag.hover || findTerminalAt(pt, from);
       drag = null;
-      if (to && !(to.id === from.id && to.i === from.i)) {
-        if (to.id === from.id) {
-          $('status').textContent = 'เลือกขั้วของอุปกรณ์อีกตัว';
+      if (!moved) {
+        // Tap on terminal → start or continue tap-by-tap sketch
+        if (wireSketch && wireSketch.from && !(wireSketch.from.id === from.id && wireSketch.from.i === from.i)) {
+          finishWireSketch(from);
         } else {
-          state().wires.push({
-            id: crypto.randomUUID(),
-            a: { id: from.id, i: from.i },
-            b: { id: to.id, i: to.i },
-            color: $('color').value,
-            width: parseFloat($('wire-size').value) || 2.5,
-            route: $('wire-route').value === 'hvh' ? 'hvh' : 'vhv',
-            bends: []
-          });
-          selectedWire = state().wires[state().wires.length - 1].id;
-          selected = null;
-          $('status').textContent = 'เชื่อมสายแล้ว · ลากมุมเลี้ยวได้';
-          persist();
+          wireSketch = { from, points: [], lastTapMs: Date.now() };
+          updateWireDoneBtn();
+          $('status').textContent = 'แตะผ้าใบเพิ่มจุด · แตะขั้วปลายทางเพื่อเชื่อม · ดับเบิลแตะ/เสร็จ = จบ';
+          render();
+          properties();
         }
+      } else if (toTerm && !(toTerm.id === from.id && toTerm.i === from.i)) {
+        createWireFromDrag(from, toTerm, path, route);
+        persist();
+        render();
+        properties();
+      } else if (moved) {
+        // Free-ending wire at release point
+        const last = path.length ? path[path.length - 1] : pt;
+        createWireFromDrag(from, { free: true, x: last.x, y: last.y }, path, route);
+        persist();
+        render();
+        properties();
       } else {
-        // restore checkpoint if cancelled? keep checkpoint as no-op undo of empty
         $('status').textContent = 'ยกเลิกการเดินสาย';
+        render();
+        properties();
       }
-      render();
-      properties();
     } else if (kind === 'bend') {
       const w = state().wires.find((x) => x.id === drag.wireId);
       if (w && drag.remove && w.bends.length) {
         w.bends.splice(drag.index, 1);
-        $('status').textContent = 'ลบมุมเลี้ยวแล้ว';
+        $('status').textContent = 'ลบจุดแล้ว';
       }
+      drag = null;
+      render();
+      properties();
+      persist();
+    } else if (kind === 'free-end') {
       drag = null;
       render();
       properties();
@@ -1413,7 +1745,7 @@
     } else if (selected) {
       checkpoint();
       state().devices = state().devices.filter((d) => d.id !== selected);
-      state().wires = state().wires.filter((w) => w.a.id !== selected && w.b.id !== selected);
+      state().wires = state().wires.filter((w) => !wireTouchesDevice(w, selected));
       selected = null;
     } else return;
     render();
@@ -1421,22 +1753,68 @@
     persist();
   }
 
+  function setTool(tName) {
+    tool = tName;
+    ['move', 'wire'].forEach((x) => $(x).classList.toggle('active', x === tName));
+    document.querySelector('.stage-wrap')?.classList.toggle('wire-mode', tName === 'wire');
+    if (tName !== 'wire') {
+      wireSketch = null;
+      updateWireDoneBtn();
+    }
+    $('status').textContent =
+      tName === 'wire'
+        ? 'โหมดสายอิสระ: ลากจากขั้วตามนิ้ว · หรือแตะทีละจุด · สองนิ้วเลื่อน/ซูม'
+        : 'ลากอุปกรณ์/ราง · ลากขั้วเพื่อเดินสาย · ลากพื้นว่างเพื่อเลื่อนมุมมอง';
+  }
+
   /* —— Board pan / zoom / empty click —— */
   const board = $('board');
   board.addEventListener('pointerdown', (e) => {
-    if (e.target.classList?.contains('bg-hit') || e.target.classList?.contains('plate') || e.target.classList?.contains('duct')) {
-      if (tool === 'move' || e.button === 1 || e.altKey) {
-        const c = cabinet();
-        const fitPx = parseFloat(board.style.width) || board.getBoundingClientRect().width;
-        drag = { kind: 'pan', cx: e.clientX, cy: e.clientY, ox: cam.x, oy: cam.y, fitPx };
-        try {
-          board.setPointerCapture(e.pointerId);
-        } catch (_) {}
-      } else {
-        selected = selectedWire = null;
-        properties();
-        render();
+    const empty =
+      e.target.classList?.contains('bg-hit') ||
+      e.target.classList?.contains('plate') ||
+      e.target.classList?.contains('duct') ||
+      e.target.classList?.contains('rail') ||
+      e.target === board;
+    if (!empty) return;
+
+    // Tap-by-tap: add bend / double-tap finish
+    if (tool === 'wire' && wireSketch && wireSketch.from && pointers.size < 2) {
+      const pt = point(e);
+      const term = findTerminalAt(pt, wireSketch.from);
+      if (term) {
+        finishWireSketch(term);
+        return;
       }
+      const now = Date.now();
+      if (now - (wireSketch.lastTapMs || 0) < 320 && wireSketch.points.length) {
+        finishWireSketch(null);
+        return;
+      }
+      wireSketch.points.push({ x: Math.round(pt.x), y: Math.round(pt.y) });
+      wireSketch.lastTapMs = now;
+      updateWireDoneBtn();
+      $('status').textContent = `จุด ${wireSketch.points.length} · แตะขั้วปลาย / ดับเบิลแตะ / เสร็จ`;
+      render();
+      return;
+    }
+
+    if (tool === 'move' || e.button === 1 || e.altKey) {
+      const c = cabinet();
+      const fitPx = parseFloat(board.style.width) || board.getBoundingClientRect().width;
+      drag = { kind: 'pan', cx: e.clientX, cy: e.clientY, ox: cam.x, oy: cam.y, fitPx };
+      try {
+        board.setPointerCapture(e.pointerId);
+      } catch (_) {}
+    } else if (tool === 'wire') {
+      // empty click in wire mode without sketch — deselect
+      selected = selectedWire = null;
+      properties();
+      render();
+    } else {
+      selected = selectedWire = null;
+      properties();
+      render();
     }
   });
   board.addEventListener('pointermove', onBoardMove);
@@ -1451,23 +1829,42 @@
     { passive: false }
   );
 
-  // Pinch zoom
+  // Pinch zoom — two fingers pan/zoom; cancels one-finger wire draw
   board.addEventListener('pointerdown', (e) => {
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pointers.size === 2 && drag && drag.kind === 'wire') {
+      // abandon freehand draw when second finger lands
+      drag = null;
+      clearDomGhost();
+      render();
+    }
   });
   board.addEventListener('pointermove', (e) => {
     if (!pointers.has(e.pointerId)) return;
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-    if (pointers.size === 2 && (!drag || drag.kind === 'pan' || drag.kind === 'pinch')) {
+    if (pointers.size === 2 && (!drag || drag.kind === 'pan' || drag.kind === 'pinch' || drag.kind === 'wire')) {
+      if (drag && drag.kind === 'wire') drag = null;
       const pts = [...pointers.values()];
       const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
       const midX = (pts[0].x + pts[1].x) / 2;
       const midY = (pts[0].y + pts[1].y) / 2;
       if (!drag || drag.kind !== 'pinch') {
-        drag = { kind: 'pinch', dist, midX, midY };
+        const c = cabinet();
+        const fitPx = parseFloat(board.style.width) || board.getBoundingClientRect().width;
+        drag = { kind: 'pinch', dist, midX, midY, cx: midX, cy: midY, ox: cam.x, oy: cam.y, fitPx };
       } else if (drag.dist > 0) {
         zoomAt(dist / drag.dist, midX, midY);
+        // two-finger pan
+        const dx = (midX - drag.cx) / (drag.fitPx / cabinet().width) / cam.zoom;
+        const dy = (midY - drag.cy) / (drag.fitPx / cabinet().width) / cam.zoom;
+        cam.x = drag.ox - dx;
+        cam.y = drag.oy - dy;
+        drag.cx = midX;
+        drag.cy = midY;
+        drag.ox = cam.x;
+        drag.oy = cam.y;
         drag.dist = dist;
+        applyCamera();
       }
     }
   });
@@ -1481,12 +1878,11 @@
 
   /* —— UI bindings —— */
   ['move', 'wire'].forEach((tName) => {
-    $(tName).onclick = () => {
-      tool = tName;
-      ['move', 'wire'].forEach((x) => $(x).classList.toggle('active', x === tName));
-      $('status').textContent = tName === 'wire' ? 'ลากจากขั้วหนึ่งไปอีกขั้ว · หรือจัดวางได้จากโหมดจัดวางเช่นกัน' : 'ลากอุปกรณ์/ราง · ลากขั้วเพื่อเดินสาย · ลากพื้นว่างเพื่อเลื่อนมุมมอง';
-    };
+    $(tName).onclick = () => setTool(tName);
   });
+  $('wire-done').onclick = () => {
+    if (wireSketch) finishWireSketch(null);
+  };
   $('ac').onclick = () => setMode('AC');
   $('dc').onclick = () => setMode('DC');
   $('undo').onclick = undo;
@@ -1499,8 +1895,11 @@
     const w = state().wires.find((x) => x.id === selectedWire);
     if (!w) return;
     checkpoint();
-    w.route = w.route === 'hvh' ? 'vhv' : 'hvh';
-    w.bends = [];
+    const order = ROUTES;
+    const i = order.indexOf(normalizeRoute(w.route));
+    w.route = order[(i + 1) % order.length];
+    if (w.route === 'vhv' || w.route === 'hvh') w.bends = defaultBends(resolveEnd(w.a), resolveEnd(w.b), w.route);
+    else if (w.route === 'straight') w.bends = [];
     render();
     properties();
     persist();
@@ -1552,8 +1951,9 @@
     const w = state().wires.find((x) => x.id === selectedWire);
     if (!w) return;
     checkpoint();
-    w.route = $('wprop-route').value === 'hvh' ? 'hvh' : 'vhv';
-    w.bends = [];
+    w.route = normalizeRoute($('wprop-route').value);
+    if (w.route === 'vhv' || w.route === 'hvh') w.bends = defaultBends(resolveEnd(w.a), resolveEnd(w.b), w.route);
+    else if (w.route === 'straight') w.bends = [];
     render();
     properties();
     persist();
@@ -1576,6 +1976,8 @@
     }
     if (e.key === 'Escape') {
       drag = null;
+      wireSketch = null;
+      updateWireDoneBtn();
       clearDomGhost();
       showTrash(false);
       selected = selectedWire = null;
