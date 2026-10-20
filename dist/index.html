@@ -160,6 +160,21 @@ svg#board{
 .dim-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px}
 .dim-grid .field{margin-bottom:0}
 footer.panel-foot{font-size:10px;color:var(--muted);margin-top:16px;line-height:1.5}
+.sel-bar{
+  display:none;align-items:center;gap:8px;flex-wrap:wrap;
+  margin:0 0 8px;padding:8px 10px;border-radius:10px;
+  background:var(--brand-soft);border:1px solid #b7ddd4;flex-shrink:0;
+}
+.sel-bar.show{display:flex}
+.sel-bar .sel-title{font-size:13px;font-weight:600;flex:1;min-width:120px}
+.sel-bar .sel-meta{font-size:11px;color:var(--muted);width:100%}
+.sel-bar button{min-height:40px;padding:6px 10px;font-size:12px}
+.sel-bar button.danger{color:var(--danger);width:auto}
+.wire-hit{pointer-events:stroke;cursor:pointer;stroke:transparent}
+.wire-path{pointer-events:none;fill:none;stroke-linejoin:round;stroke-linecap:round}
+.bend-handle{cursor:grab;fill:#fff;stroke:#0a6b5c;stroke-width:2}
+.tools .grow{flex:1;min-width:100px}
+#wire-size{width:auto;min-width:88px}
 
 /* Mobile tabs */
 .mobile-tabs{
@@ -270,9 +285,27 @@ footer.panel-foot{font-size:10px;color:var(--muted);margin-top:16px;line-height:
       <button type="button" id="move" class="active">↖ จัดวาง</button>
       <button type="button" id="wire">⌁ เดินสาย</button>
       <select id="color" aria-label="ประเภทสาย"></select>
+      <select id="wire-size" aria-label="ขนาดสาย">
+        <option value="2">บาง · 2</option>
+        <option value="2.5" selected>ปกติ · 2.5</option>
+        <option value="3.5">กลาง · 3.5</option>
+        <option value="5">หนา · 5</option>
+      </select>
+      <select id="wire-route" aria-label="แนวสาย">
+        <option value="vhv">แนว V–H–V</option>
+        <option value="hvh">แนว H–V–H</option>
+      </select>
       <button type="button" id="undo">↶ ย้อน</button>
       <button type="button" id="clear">ล้างแบบ</button>
       <button type="button" id="zoom-fit" title="พอดีจอ">⊡ พอดี</button>
+    </div>
+    <div class="sel-bar" id="sel-bar" hidden>
+      <div class="sel-title" id="sel-title">—</div>
+      <button type="button" id="sel-route" hidden>สลับแนว</button>
+      <button type="button" id="sel-add-bend" hidden>＋ มุมเลี้ยว</button>
+      <button type="button" id="sel-clear-bends" hidden>รีเซ็ตเส้น</button>
+      <button type="button" id="sel-delete" class="danger">ลบ</button>
+      <div class="sel-meta" id="sel-meta"></div>
     </div>
     <div class="stage-wrap">
       <div class="stage-scroll" id="stage-scroll">
@@ -282,18 +315,37 @@ footer.panel-foot{font-size:10px;color:var(--muted);margin-top:16px;line-height:
     <div class="warn-banner" id="warnings" role="status"></div>
     <div class="legend" id="legend"></div>
     <div class="status" id="status" aria-live="polite">เลือกอุปกรณ์จากด้านซ้ายเพื่อเริ่มจัดวาง</div>
-    <div class="hint">จัดวาง: ลากอุปกรณ์ · เดินสาย: แตะขั้วต้นทาง–ปลายทาง · ลบสาย: แตะสาย · Delete: ลบอุปกรณ์</div>
+    <div class="hint">จัดวาง: ลากอุปกรณ์ · เดินสาย: แตะขั้วสองจุด · แตะสายเพื่อเลือก/ลากมุมเลี้ยว · Delete หรือ Backspace: ลบที่เลือก</div>
   </main>
 
   <aside class="panel panel-right" id="panel-props" data-panel="props">
     <div>
-      <h2>คุณสมบัติอุปกรณ์</h2>
-      <div id="empty"><p class="muted">เลือกอุปกรณ์ในตู้เพื่อแก้ไขชื่อและพิกัด</p></div>
+      <h2>คุณสมบัติ</h2>
+      <div id="empty"><p class="muted">เลือกอุปกรณ์หรือสายในตู้เพื่อแก้ไข</p></div>
       <div id="props" hidden>
         <div class="field"><label for="label">ชื่ออุปกรณ์</label><input id="label" maxlength="40"></div>
         <div class="field"><label for="rating">พิกัด / หมายเหตุ</label><input id="rating" maxlength="40"></div>
         <div class="field"><label>ขนาดจริง</label><div class="muted" id="dev-size">—</div></div>
         <button type="button" id="remove" class="danger">ลบอุปกรณ์</button>
+      </div>
+      <div id="wire-props" hidden>
+        <div class="field"><label for="wprop-color">สีสาย</label><select id="wprop-color"></select></div>
+        <div class="field"><label for="wprop-size">ขนาดเส้น</label>
+          <select id="wprop-size">
+            <option value="2">บาง · 2</option>
+            <option value="2.5">ปกติ · 2.5</option>
+            <option value="3.5">กลาง · 3.5</option>
+            <option value="5">หนา · 5</option>
+          </select>
+        </div>
+        <div class="field"><label for="wprop-route">แนวเดินสาย</label>
+          <select id="wprop-route">
+            <option value="vhv">แนวตั้ง–นอน–ตั้ง (V–H–V)</option>
+            <option value="hvh">แนวนอน–ตั้ง–นอน (H–V–H)</option>
+          </select>
+        </div>
+        <p class="muted" id="wprop-info">—</p>
+        <button type="button" id="remove-wire" class="danger">ลบสาย</button>
       </div>
     </div>
     <div style="margin-top:20px">

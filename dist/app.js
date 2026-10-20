@@ -1,15 +1,32 @@
-/* Panel Studio v2 — ออกแบบตู้ไฟมาตราส่วนจริง (มม.) */
+/* Panel Studio v3 — มาตราส่วนจริง + สายมุมเลี้ยว + เลือก/ลบได้ทุกชิ้น */
 (() => {
   const $ = (id) => document.getElementById(id);
   const NS = 'http://www.w3.org/2000/svg';
   const C = window.PANEL_CATALOG;
   const MODULE = C.MODULE_MM;
   const STORAGE = 'panel-studio-v1';
-  const VERSION = 2;
+  const VERSION = 3;
 
-  const DEFAULT_CAB = (mode) => {
-    const preferred = mode === 'AC' ? 'ind-600' : 'pv-400';
-    const p = C.presets.find((x) => x.id === preferred) || C.presets.find((x) => x.mode === mode);
+  const WIRE_COLORS = {
+    AC: [
+      ['#8B4513', 'L1 · น้ำตาล'],
+      ['#1a1a1a', 'L2 · ดำ'],
+      ['#6B7280', 'L3 · เทา'],
+      ['#2563EB', 'N · น้ำเงิน'],
+      ['#16A34A', 'PE · เขียว'],
+      ['#CA8A04', 'PE · เหลืองเขียว']
+    ],
+    DC: [
+      ['#DC2626', '+ · แดง'],
+      ['#1a1a1a', '− · ดำ'],
+      ['#16A34A', 'PE · เขียว'],
+      ['#2563EB', 'สัญญาณ · น้ำเงิน']
+    ]
+  };
+
+  const DEFAULT_CAB = (m) => {
+    const preferred = m === 'AC' ? 'ind-600' : 'pv-400';
+    const p = C.presets.find((x) => x.id === preferred) || C.presets.find((x) => x.mode === m);
     return cabinetFromPreset(p);
   };
 
@@ -38,14 +55,16 @@
   };
   let mode = 'AC';
   let tool = 'move';
-  let selected = null;
+  let selected = null; // device id
+  let selectedWire = null; // wire id
   let start = null;
-  let drag = null;
+  let drag = null; // { kind:'device'|'bend', ... }
   let history = [];
   let catFilter = 'all';
   let viewScale = 1;
+  let lastBendTap = 0;
 
-  /* —— Catalog helpers —— */
+  /* —— Catalog —— */
   function devicesFor(m) {
     return C.devices.filter((d) => d.modes.includes(m));
   }
@@ -53,29 +72,31 @@
     return C.devices.find((d) => d.id === type);
   }
   function deviceWidth(t) {
-    if (t.widthMm) return t.widthMm;
-    return t.modules * MODULE;
+    return t.widthMm || t.modules * MODULE;
   }
   function deviceHeight(t) {
     return t.heightMm || C.DEVICE_BODY_H;
   }
 
-  /* —— Geometry / cabinet —— */
+  /* —— Geometry —— */
+  function state() {
+    return data[mode];
+  }
   function cabinet() {
     return state().cabinet;
   }
   function plate() {
     const c = cabinet();
-    const x = c.marginSide + c.ductSide;
-    const y = c.marginTop + c.ductTop;
-    const w = c.width - 2 * (c.marginSide + c.ductSide);
-    const h = c.height - c.marginTop - c.marginBottom - c.ductTop - c.ductBottom;
-    return { x, y, w, h };
+    return {
+      x: c.marginSide + c.ductSide,
+      y: c.marginTop + c.ductTop,
+      w: c.width - 2 * (c.marginSide + c.ductSide),
+      h: c.height - c.marginTop - c.marginBottom - c.ductTop - c.ductBottom
+    };
   }
   function railOffset(t) {
     return deviceHeight(t) * (C.layoutDefaults.railOffsetRatio || 0.42);
   }
-  /** จัดรางให้พอดีแผ่นติดตั้ง — ย่อระยะรางอัตโนมัติเมื่อตู้เตี้ย */
   function railLayout() {
     const c = cabinet();
     const p = plate();
@@ -95,8 +116,14 @@
     }
     const total = (n - 1) * pitch;
     const startY = p.y + headroom + Math.max(0, (span - total) / 2);
-    const ys = Array.from({ length: n }, (_, i) => Math.round(startY + i * pitch));
-    return { ys, pitch, fitted, n, headroom, footroom };
+    return {
+      ys: Array.from({ length: n }, (_, i) => Math.round(startY + i * pitch)),
+      pitch,
+      fitted,
+      n,
+      headroom,
+      footroom
+    };
   }
   function railYs() {
     return railLayout().ys;
@@ -119,31 +146,51 @@
     let x = Math.max(p.x + 4, Math.min(p.x + p.w - w - 4, d.x));
     let y = d.y;
     if (!t.freePlace) y = snapToRail(y, t);
-    // บังคับให้อยู่ในแผ่นติดตั้งหลัง snap
     y = Math.max(p.y + 2, Math.min(p.y + p.h - h - 2, y));
     x = Math.max(p.x + 4, Math.min(p.x + p.w - w - 4, x));
     return { x: Math.round(x), y: Math.round(y) };
   }
 
-  /* —— Persistence / migration —— */
-  function validDevice(d, m) {
-    if (!d || typeof d.id !== 'string') return false;
-    if (!spec(d.type) || !spec(d.type).modes.includes(m)) return false;
-    if (typeof d.label !== 'string' || typeof d.rating !== 'string') return false;
-    if (!Number.isFinite(d.x) || !Number.isFinite(d.y)) return false;
-    return true;
+  /* —— Persistence —— */
+  function normalizeWire(w, devices) {
+    if (!w || typeof w.id !== 'string') return null;
+    if (!/^#[0-9a-f]{6}$/i.test(w.color)) return null;
+    const okEnd = (e) =>
+      e &&
+      typeof e.id === 'string' &&
+      Number.isInteger(e.i) &&
+      e.i >= 0 &&
+      e.i < 16 &&
+      devices.some((x) => x.id === e.id);
+    if (!okEnd(w.a) || !okEnd(w.b)) return null;
+    const bends = Array.isArray(w.bends)
+      ? w.bends
+          .filter((b) => b && Number.isFinite(b.x) && Number.isFinite(b.y))
+          .slice(0, 40)
+          .map((b) => ({ x: Math.round(b.x), y: Math.round(b.y) }))
+      : [];
+    const width = Number(w.width);
+    const route = w.route === 'hvh' ? 'hvh' : 'vhv';
+    return {
+      id: w.id,
+      a: { id: w.a.id, i: w.a.i },
+      b: { id: w.b.id, i: w.b.i },
+      color: w.color,
+      width: Number.isFinite(width) ? Math.max(1, Math.min(8, width)) : 2.5,
+      route,
+      bends
+    };
   }
-  function validWire(w, devices) {
-    if (!w || typeof w.id !== 'string') return false;
-    if (!/^#[0-9a-f]{6}$/i.test(w.color)) return false;
-    return [w.a, w.b].every(
-      (e) =>
-        e &&
-        typeof e.id === 'string' &&
-        Number.isInteger(e.i) &&
-        e.i >= 0 &&
-        e.i < 16 &&
-        devices.some((x) => x.id === e.id)
+  function validDevice(d, m) {
+    return (
+      d &&
+      typeof d.id === 'string' &&
+      spec(d.type) &&
+      spec(d.type).modes.includes(m) &&
+      typeof d.label === 'string' &&
+      typeof d.rating === 'string' &&
+      Number.isFinite(d.x) &&
+      Number.isFinite(d.y)
     );
   }
   function normalizeCabinet(cab, m) {
@@ -168,28 +215,23 @@
       ductSide: num(cab.ductSide, base.ductSide, 0, 80)
     };
   }
-  /** แปลงพิกัดรุ่นเก่า (บอร์ด 800×560) → มม. ตามตู้ใหม่ */
   function migrateLegacyCoords(devices, cab) {
-    const p = (() => {
-      const x = cab.marginSide + cab.ductSide;
-      const y = cab.marginTop + cab.ductTop;
-      const w = cab.width - 2 * (cab.marginSide + cab.ductSide);
-      const h = cab.height - cab.marginTop - cab.marginBottom - cab.ductTop - cab.ductBottom;
-      return { x, y, w, h };
-    })();
-    const ys = (() => {
-      const n = cab.rails;
-      const pitch = cab.pitch;
-      const usable = p.h - 20;
-      const total = (n - 1) * pitch;
-      const startY = p.y + Math.max(30, (usable - total) / 2);
-      return Array.from({ length: n }, (_, i) => Math.round(startY + i * pitch));
-    })();
+    const p = {
+      x: cab.marginSide + cab.ductSide,
+      y: cab.marginTop + cab.ductTop,
+      w: cab.width - 2 * (cab.marginSide + cab.ductSide),
+      h: cab.height - cab.marginTop - cab.marginBottom - cab.ductTop - cab.ductBottom
+    };
+    const n = cab.rails;
+    const pitch = cab.pitch;
+    const usable = p.h - 20;
+    const total = (n - 1) * pitch;
+    const startY = p.y + Math.max(30, (usable - total) / 2);
+    const ys = Array.from({ length: n }, (_, i) => Math.round(startY + i * pitch));
     const oldRails = [80, 240, 400];
     return devices.map((d) => {
       const t = spec(d.type);
       if (!t) return d;
-      // ถ้าพิกัดดูเหมือนระบบเก่า (อยู่ในกรอบ 800×560 และกว้างกว่าตู้ใหม่มาก)
       const looksLegacy = d.x <= 800 && d.y <= 560 && (cab.width < 750 || d.x > cab.width);
       if (!looksLegacy && d.x <= cab.width && d.y <= cab.height) {
         const pos = clampDevice({ x: d.x, y: d.y }, t);
@@ -198,7 +240,7 @@
       const sx = p.x + 5 + (d.x / 800) * Math.max(40, p.w - deviceWidth(t) - 10);
       const nearestOld = oldRails.reduce((a, b) => (Math.abs(b - d.y) < Math.abs(a - d.y) ? b : a));
       const idx = Math.min(ys.length - 1, Math.max(0, oldRails.indexOf(nearestOld)));
-      const y = t.freePlace ? p.y + (d.y / 560) * p.h : ys[idx] - deviceHeight(t) * 0.55;
+      const y = t.freePlace ? p.y + (d.y / 560) * p.h : ys[idx] - deviceHeight(t) * 0.42;
       const pos = clampDevice({ x: sx, y }, t);
       return { ...d, x: pos.x, y: pos.y };
     });
@@ -225,16 +267,13 @@
       }
       const wires = [];
       for (const w of block.wires) {
-        if (!validWire(w, devices)) return null;
-        wires.push({ id: w.id, a: { id: w.a.id, i: w.a.i }, b: { id: w.b.id, i: w.b.i }, color: w.color });
+        const nw = normalizeWire(w, devices);
+        if (!nw) return null;
+        wires.push(nw);
       }
-      const migrated = migrateLegacyCoords(devices, cab);
-      out[m] = { devices: migrated, wires, cabinet: cab };
+      out[m] = { devices: migrateLegacyCoords(devices, cab), wires, cabinet: cab };
     }
     return out;
-  }
-  function valid(raw) {
-    return !!migrate(raw);
   }
 
   try {
@@ -243,9 +282,6 @@
     if (m) data = m;
   } catch (_) {}
 
-  function state() {
-    return data[mode];
-  }
   function checkpoint() {
     history.push(JSON.stringify(data));
     if (history.length > 60) history.shift();
@@ -274,7 +310,7 @@
     return p.matrixTransform(ctm.inverse());
   }
 
-  /* —— Ports / wiring —— */
+  /* —— Ports —— */
   function ports(d) {
     const t = spec(d.type);
     if (!t) return [];
@@ -288,9 +324,10 @@
       const x = d.x + ((col + 1) * w) / (n + 1);
       const y = d.y + (top ? 0 : h);
       let label;
-      if (isBar) label = t.name.includes('PE') || t.id.includes('PE') ? 'PE' : t.name.includes('N') || t.id.includes('N') ? 'N' : 'B';
-      else if (mode === 'AC') {
-        if (n === 1) label = top ? 'L' : 'L';
+      if (isBar) {
+        label = t.name.includes('PE') || t.id.includes('PE') ? 'PE' : t.name.includes('N') || t.id.includes('N') ? 'N' : 'B';
+      } else if (mode === 'AC') {
+        if (n === 1) label = 'L';
         else if (n === 2) label = col === 0 ? 'L' : 'N';
         else if (n === 3) label = ['R', 'S', 'T'][col];
         else label = ['R', 'S', 'T', 'N'][col] || String(col + 1);
@@ -305,7 +342,65 @@
     return d && ports(d)[e.i];
   }
 
-  /* —— Fit warnings —— */
+  /* —— Wire geometry —— */
+  function orthCorner(a, b, prefer) {
+    if (a.x === b.x || a.y === b.y) return [];
+    if (prefer === 'hvh') return [{ x: b.x, y: a.y }];
+    return [{ x: a.x, y: b.y }];
+  }
+  function defaultBends(a, b, route) {
+    if (Math.abs(a.x - b.x) < 1 || Math.abs(a.y - b.y) < 1) return [];
+    if (route === 'hvh') {
+      const mx = Math.round((a.x + b.x) / 2);
+      return [
+        { x: mx, y: a.y },
+        { x: mx, y: b.y }
+      ];
+    }
+    const my = Math.round((a.y + b.y) / 2);
+    return [
+      { x: a.x, y: my },
+      { x: b.x, y: my }
+    ];
+  }
+  /** Full orthogonal polyline including endpoints */
+  function wirePolyline(w) {
+    const a = endpoint(w.a);
+    const b = endpoint(w.b);
+    if (!a || !b) return [];
+    const route = w.route === 'hvh' ? 'hvh' : 'vhv';
+    const mids = w.bends && w.bends.length ? w.bends : defaultBends(a, b, route);
+    const keys = [{ x: a.x, y: a.y }, ...mids.map((p) => ({ x: p.x, y: p.y })), { x: b.x, y: b.y }];
+    const out = [keys[0]];
+    for (let i = 1; i < keys.length; i++) {
+      const prev = out[out.length - 1];
+      const cur = keys[i];
+      if (prev.x === cur.x && prev.y === cur.y) continue;
+      if (prev.x !== cur.x && prev.y !== cur.y) {
+        const corners = orthCorner(prev, cur, route);
+        corners.forEach((c) => {
+          const last = out[out.length - 1];
+          if (last.x !== c.x || last.y !== c.y) out.push(c);
+        });
+      }
+      const last = out[out.length - 1];
+      if (last.x !== cur.x || last.y !== cur.y) out.push(cur);
+    }
+    return out;
+  }
+  function pathD(pts) {
+    if (pts.length < 2) return '';
+    return pts.map((p, i) => `${i ? 'L' : 'M'}${p.x},${p.y}`).join(' ');
+  }
+  function bringDeviceFront(id) {
+    const arr = state().devices;
+    const i = arr.findIndex((d) => d.id === id);
+    if (i < 0 || i === arr.length - 1) return;
+    const [d] = arr.splice(i, 1);
+    arr.push(d);
+  }
+
+  /* —— Warnings —— */
   function computeWarnings() {
     const msgs = [];
     const c = cabinet();
@@ -314,59 +409,85 @@
     const maxMods = Math.floor(usable / MODULE);
     const ys = railYs();
     const byRail = ys.map(() => 0);
-    let freeArea = 0;
-
     for (const d of state().devices) {
       const t = spec(d.type);
       if (!t) continue;
       const w = deviceWidth(t);
       const h = deviceHeight(t);
-      if (d.x < p.x || d.y < p.y || d.x + w > p.x + p.w + 1 || d.y + h > p.y + p.h + 1) {
+      if (d.x < p.x - 1 || d.y < p.y - 1 || d.x + w > p.x + p.w + 2 || d.y + h > p.y + p.h + 2) {
         msgs.push(`«${d.label}» อยู่นอกแผ่นติดตั้ง`);
       }
       if (t.depthMm && t.depthMm > c.depth) {
         msgs.push(`«${d.label}» ลึก ${t.depthMm} มม. แต่ตู้ลึก ${c.depth} มม.`);
       }
-      if (t.freePlace) {
-        freeArea += w * h;
-        continue;
-      }
-      // nearest rail
-      const mid = d.y + h * 0.55;
+      if (t.freePlace) continue;
+      const mid = d.y + h * 0.42;
       let best = 0;
       ys.forEach((ry, i) => {
         if (Math.abs(ry - mid) < Math.abs(ys[best] - mid)) best = i;
       });
       byRail[best] += t.modules;
     }
-
     byRail.forEach((mods, i) => {
       if (mods > maxMods) {
-        msgs.push(`ราง DIN ${String(i + 1).padStart(2, '0')} ใช้ ${mods} โมดูล จากที่มีได้ ~${maxMods} (กว้างราง ${Math.round(usable)} มม.)`);
+        msgs.push(`ราง DIN ${String(i + 1).padStart(2, '0')} ใช้ ${mods} โมดูล จากที่มีได้ ~${maxMods}`);
       }
     });
-
     const layout = railLayout();
     if (!layout.fitted) {
-      const needPitch = Math.max(95, c.pitch);
-      const needH =
-        c.marginTop +
-        c.ductTop +
-        c.marginBottom +
-        c.ductBottom +
-        layout.headroom +
-        layout.footroom +
-        (c.rails - 1) * needPitch;
-      msgs.push(`ระยะรางถูกย่อเหลือ ~${Math.round(layout.pitch)} มม. — ตู้สูง ${c.height} มม. แน่นสำหรับ ${c.rails} ราง (แนะนำสูง ≥ ${Math.round(needH)} มม.)`);
-    }
-
-    if (!msgs.length && state().devices.length) {
-      const used = byRail.reduce((a, b) => a + b, 0);
-      if (used > maxMods * c.rails * 0.9) {
-        msgs.push('พื้นที่รางใกล้เต็ม — พิจารณาตู้ที่กว้างขึ้นหรือเพิ่มราง');
-      }
+      msgs.push(`ระยะรางถูกย่อเหลือ ~${Math.round(layout.pitch)} มม. — ตู้สูง ${c.height} มม. แน่นสำหรับ ${c.rails} ราง`);
     }
     return { msgs, byRail, maxMods };
+  }
+
+  /* —— Selection UI —— */
+  function clearSelection() {
+    selected = null;
+    selectedWire = null;
+    start = null;
+  }
+  function updateSelBar() {
+    const bar = $('sel-bar');
+    const d = selected && state().devices.find((x) => x.id === selected);
+    const w = selectedWire && state().wires.find((x) => x.id === selectedWire);
+    const show = !!(d || w);
+    bar.hidden = !show;
+    bar.classList.toggle('show', show);
+    $('sel-route').hidden = !w;
+    $('sel-add-bend').hidden = !w;
+    $('sel-clear-bends').hidden = !w;
+    if (d) {
+      const t = spec(d.type);
+      $('sel-title').textContent = `อุปกรณ์: ${d.label}`;
+      $('sel-meta').textContent = t
+        ? `${t.nameTh} · ${deviceWidth(t)}×${deviceHeight(t)} มม. · แตะ «ลบ» หรือกด Delete/Backspace`
+        : 'แตะ «ลบ» เพื่อลบ';
+    } else if (w) {
+      $('sel-title').textContent = 'สายที่เลือก';
+      $('sel-meta').textContent = `มุมเลี้ยว ${w.bends.length} จุด · ลากจุดเขียวเพื่อจัดเส้น · สองครั้งที่เส้นเพื่อเพิ่มมุม`;
+    }
+  }
+  function properties() {
+    const d = selected && state().devices.find((x) => x.id === selected);
+    const w = selectedWire && state().wires.find((x) => x.id === selectedWire);
+    $('props').hidden = !d;
+    $('wire-props').hidden = !w;
+    $('empty').hidden = !!(d || w);
+    if (d) {
+      const t = spec(d.type);
+      $('label').value = d.label;
+      $('rating').value = d.rating;
+      $('dev-size').textContent = t
+        ? `${deviceWidth(t)} × ${deviceHeight(t)} มม. · ${t.modules} โมดูล · ลึก ~${t.depthMm || '—'} มม.`
+        : '—';
+    }
+    if (w) {
+      fillColorSelect($('wprop-color'), w.color);
+      $('wprop-size').value = String(w.width);
+      $('wprop-route').value = w.route || 'vhv';
+      $('wprop-info').textContent = `จุดเลี้ยว ${w.bends.length} · ยึดกับขั้วอุปกรณ์เมื่อย้าย`;
+    }
+    updateSelBar();
   }
 
   /* —— Render —— */
@@ -374,14 +495,10 @@
     const c = cabinet();
     const board = $('board');
     board.setAttribute('viewBox', `0 0 ${c.width} ${c.height}`);
-    // Display size: scale so cabinet fits stage while remaining touch-friendly
     const scroll = $('stage-scroll');
     const availW = Math.max(280, scroll.clientWidth - 8);
     const availH = Math.max(240, scroll.clientHeight - 8);
-    const sx = availW / c.width;
-    const sy = availH / c.height;
-    viewScale = Math.min(sx, sy, 1.8);
-    // On very large cabinets allow scroll; min pixel size for readability
+    viewScale = Math.min(availW / c.width, availH / c.height, 1.8);
     const pxW = Math.max(Math.round(c.width * viewScale), Math.min(availW, c.width));
     const pxH = Math.round((pxW / c.width) * c.height);
     board.style.width = pxW + 'px';
@@ -403,7 +520,6 @@
     defs.append(pat);
     b.append(defs);
 
-    // Outer enclosure
     b.append(
       el('rect', {
         x: 0,
@@ -413,10 +529,10 @@
         fill: '#c5ced4',
         stroke: '#6d7e88',
         'stroke-width': 3,
-        rx: 4
+        rx: 4,
+        class: 'bg-hit'
       })
     );
-    // Door frame inset
     b.append(
       el('rect', {
         x: 6,
@@ -426,48 +542,29 @@
         fill: 'url(#grid)',
         stroke: '#8a9aa3',
         'stroke-width': 1,
-        rx: 2
+        rx: 2,
+        class: 'bg-hit'
       })
     );
 
-    // Wiring ducts
     if (c.ductTop > 0) {
       b.append(
-        el('rect', {
-          class: 'duct',
-          x: c.marginSide,
-          y: c.marginTop,
-          width: c.width - 2 * c.marginSide,
-          height: c.ductTop,
-          rx: 2
-        }),
+        el('rect', { class: 'duct', x: c.marginSide, y: c.marginTop, width: c.width - 2 * c.marginSide, height: c.ductTop, rx: 2 }),
         el('text', { x: c.width / 2, y: c.marginTop + c.ductTop / 2 + 4, 'text-anchor': 'middle', 'font-size': 11, fill: '#5f717b' }, 'รางสายด้านบน')
       );
     }
     if (c.ductBottom > 0) {
       const dy = c.height - c.marginBottom - c.ductBottom;
       b.append(
-        el('rect', {
-          class: 'duct',
-          x: c.marginSide,
-          y: dy,
-          width: c.width - 2 * c.marginSide,
-          height: c.ductBottom,
-          rx: 2
-        }),
+        el('rect', { class: 'duct', x: c.marginSide, y: dy, width: c.width - 2 * c.marginSide, height: c.ductBottom, rx: 2 }),
         el('text', { x: c.width / 2, y: dy + c.ductBottom / 2 + 4, 'text-anchor': 'middle', 'font-size': 11, fill: '#5f717b' }, 'รางสายด้านล่าง')
       );
     }
 
-    // Mounting plate
     b.append(el('rect', { class: 'plate', x: p.x, y: p.y, width: p.w, height: p.h, rx: 2 }));
-    b.append(
-      el('text', { x: p.x + 6, y: p.y + 14, 'font-size': 10, fill: '#7a8b94' }, `แผ่นติดตั้ง ${Math.round(p.w)}×${Math.round(p.h)} มม.`)
-    );
+    b.append(el('text', { x: p.x + 6, y: p.y + 14, 'font-size': 10, fill: '#7a8b94' }, `แผ่นติดตั้ง ${Math.round(p.w)}×${Math.round(p.h)} มม.`));
 
-    // DIN rails
-    const ys = railYs();
-    ys.forEach((y, i) => {
+    railYs().forEach((y, i) => {
       const rw = railUsableWidth();
       const rx = p.x + 5;
       b.append(
@@ -477,59 +574,87 @@
       );
     });
 
-    // Dimension labels
     b.append(
       el('text', { x: c.width / 2, y: c.height - 8, 'text-anchor': 'middle', 'font-size': 10, fill: '#5c6e77' }, `กว้าง ${c.width} มม.`),
-      el('text', {
-        x: 12,
-        y: c.height / 2,
-        'text-anchor': 'middle',
-        'font-size': 10,
-        fill: '#5c6e77',
-        transform: `rotate(-90 12 ${c.height / 2})`
-      }, `สูง ${c.height} มม.`)
+      el(
+        'text',
+        {
+          x: 12,
+          y: c.height / 2,
+          'text-anchor': 'middle',
+          'font-size': 10,
+          fill: '#5c6e77',
+          transform: `rotate(-90 12 ${c.height / 2})`
+        },
+        `สูง ${c.height} มม.`
+      )
     );
 
-    // Wires
+    // Wire visuals under devices
     state().wires.forEach((w) => {
-      const a = endpoint(w.a);
-      const c2 = endpoint(w.b);
-      if (!a || !c2) return;
-      const offset = a.y === c2.y ? a.y - 18 : (a.y + c2.y) / 2;
-      const path = el('path', {
-        d: `M${a.x},${a.y} V${offset} H${c2.x} V${c2.y}`,
-        fill: 'none',
-        stroke: w.color,
-        'stroke-width': 2.5,
-        'stroke-linejoin': 'round',
-        class: 'wire'
-      });
-      path.addEventListener('click', (e) => {
-        e.stopPropagation();
-        checkpoint();
-        state().wires = state().wires.filter((x) => x.id !== w.id);
-        render();
-        persist();
-      });
-      b.append(path);
+      const pts = wirePolyline(w);
+      if (pts.length < 2) return;
+      const d = pathD(pts);
+      const active = selectedWire === w.id;
+      const sw = w.width || 2.5;
+      const g = el('g', { class: 'wire-visual', 'pointer-events': 'none' });
+      if (active) {
+        g.append(
+          el('path', {
+            d,
+            fill: 'none',
+            stroke: '#0a6b5c',
+            'stroke-width': sw + 4,
+            opacity: 0.35,
+            'stroke-linejoin': 'round',
+            class: 'wire-path'
+          })
+        );
+      }
+      g.append(
+        el('path', {
+          d,
+          fill: 'none',
+          stroke: w.color,
+          'stroke-width': active ? sw + 1 : sw,
+          'stroke-linejoin': 'round',
+          'stroke-linecap': 'round',
+          class: 'wire-path'
+        })
+      );
+      b.append(g);
     });
 
-    // Devices
+    // Devices. Invisible padded hit-rect for reliable selection.
     state().devices.forEach((d) => {
       const t = spec(d.type);
       if (!t) return;
       const w = deviceWidth(t);
       const h = deviceHeight(t);
-      const g = el('g', { class: 'device' + (t.freePlace ? ' free' : '') });
-      const stroke = selected === d.id ? '#0a6b5c' : '#8a9ba4';
-      const sw = selected === d.id ? 2.5 : 1.2;
+      const g = el('g', { class: 'device' + (t.freePlace ? ' free' : ''), 'data-id': d.id });
+      const isSel = selected === d.id;
+      const stroke = isSel ? '#0a6b5c' : '#8a9ba4';
+      const sw = isSel ? 2.5 : 1.2;
+
+      // Generous hit target (min ~24mm visual feel via padding in SVG units)
+      const pad = Math.max(2, Math.min(6, 24 - Math.min(w, h) / 2));
+      const hit = el('rect', {
+        x: d.x - pad,
+        y: d.y - pad,
+        width: w + pad * 2,
+        height: h + pad * 2,
+        fill: 'transparent',
+        class: 'device-hit'
+      });
+
       g.append(
+        hit,
         el('rect', { x: d.x, y: d.y, width: w, height: h, rx: 3, fill: '#fff', stroke, 'stroke-width': sw }),
         el('rect', {
           x: d.x + 4,
           y: d.y + h * 0.35,
-          width: w - 8,
-          height: Math.max(12, h * 0.22),
+          width: Math.max(2, w - 8),
+          height: Math.max(10, h * 0.22),
           rx: 2,
           fill: t.isBar ? '#b89a4e' : '#243842'
         }),
@@ -557,21 +682,34 @@
         )
       );
 
-      g.addEventListener('pointerdown', (e) => {
-        if (tool !== 'move') return;
+      const selectDevice = (e) => {
         e.stopPropagation();
+        selectedWire = null;
         selected = d.id;
-        const pt = point(e);
-        checkpoint();
-        drag = { id: d.id, dx: pt.x - d.x, dy: pt.y - d.y };
-        try {
-          b.setPointerCapture(e.pointerId);
-        } catch (_) {}
-        render();
+        bringDeviceFront(d.id);
+        start = null;
+        if (tool === 'move') {
+          const pt = point(e);
+          if (!drag) checkpoint();
+          drag = { kind: 'device', id: d.id, dx: pt.x - d.x, dy: pt.y - d.y };
+          try {
+            b.setPointerCapture(e.pointerId);
+          } catch (_) {}
+        }
         properties();
+        render();
+      };
+
+      hit.addEventListener('pointerdown', selectDevice);
+      // Also allow pressing body rects
+      g.querySelectorAll('rect:not(.device-hit)').forEach((r) => {
+        r.style.pointerEvents = 'none';
+      });
+      g.querySelectorAll('text').forEach((tx) => {
+        tx.style.pointerEvents = 'none';
       });
 
-      ports(d).forEach((pt, i) => {
+      ports(d).forEach((pt) => {
         const fs = Math.max(6, Math.min(9, w / (t.poles + 2)));
         g.append(
           el(
@@ -581,15 +719,90 @@
               y: pt.y + (pt.top ? 11 : -5),
               'text-anchor': 'middle',
               'font-size': fs,
-              fill: '#6a7c86'
+              fill: '#6a7c86',
+              style: 'pointer-events:none'
             },
             pt.label
           )
         );
+      });
+      b.append(g);
+    });
+
+    // Wire hit targets + bend handles ABOVE devices so exposed segments stay clickable
+    state().wires.forEach((w) => {
+      const pts = wirePolyline(w);
+      if (pts.length < 2) return;
+      const d = pathD(pts);
+      const active = selectedWire === w.id;
+      const sw = w.width || 2.5;
+      const g = el('g', { class: 'wire-interact' });
+      const hit = el('path', {
+        d,
+        fill: 'none',
+        stroke: 'transparent',
+        'stroke-width': Math.max(16, sw + 14),
+        'stroke-linejoin': 'round',
+        'stroke-linecap': 'round',
+        class: 'wire-hit'
+      });
+      const selectWire = (e) => {
+        e.stopPropagation();
+        selected = null;
+        selectedWire = w.id;
+        start = null;
+        drag = null;
+        properties();
+        render();
+      };
+      hit.addEventListener('pointerdown', (e) => {
+        if (tool === 'wire' && start) return;
+        selectWire(e);
+      });
+      hit.addEventListener('dblclick', (e) => {
+        e.stopPropagation();
+        addBendAtPointer(w, point(e));
+      });
+      hit.addEventListener('pointerup', (e) => {
+        if (selectedWire !== w.id) return;
+        const now = Date.now();
+        if (now - lastBendTap < 350) {
+          addBendAtPointer(w, point(e));
+          lastBendTap = 0;
+        } else lastBendTap = now;
+      });
+      g.append(hit);
+
+      if (active) {
+        const handles = w.bends.length ? w.bends : defaultBends(endpoint(w.a), endpoint(w.b), w.route || 'vhv');
+        handles.forEach((bp, i) => {
+          const h = el('circle', { cx: bp.x, cy: bp.y, r: 8, class: 'bend-handle' });
+          h.addEventListener('pointerdown', (e) => {
+            e.stopPropagation();
+            checkpoint();
+            if (!w.bends.length) w.bends = handles.map((p) => ({ x: p.x, y: p.y }));
+            drag = { kind: 'bend', wireId: w.id, index: i };
+            try {
+              b.setPointerCapture(e.pointerId);
+            } catch (_) {}
+            render();
+          });
+          g.append(h);
+        });
+      }
+      b.append(g);
+    });
+
+    // Terminals on top of wire hits so เดินสาย still works at endpoints
+    state().devices.forEach((d) => {
+      const t = spec(d.type);
+      if (!t) return;
+      ports(d).forEach((pt, i) => {
+        const r = Math.max(6, Math.min(8, Math.max(deviceWidth(t), deviceHeight(t)) / 12));
         const circle = el('circle', {
           cx: pt.x,
           cy: pt.y,
-          r: Math.max(4, Math.min(6, w / 10)),
+          r,
           fill: start?.id === d.id && start.i === i ? '#e8a020' : '#dfe6ea',
           stroke: '#5a6d77',
           'stroke-width': 1.5,
@@ -597,20 +810,26 @@
         });
         circle.addEventListener('pointerdown', (e) => {
           e.stopPropagation();
-          if (tool !== 'wire') {
-            selected = d.id;
-            render();
-            properties();
+          if (tool === 'wire') {
+            connect({ id: d.id, i });
             return;
           }
-          connect({ id: d.id, i });
+          selectedWire = null;
+          selected = d.id;
+          bringDeviceFront(d.id);
+          const p = point(e);
+          checkpoint();
+          drag = { kind: 'device', id: d.id, dx: p.x - d.x, dy: p.y - d.y };
+          try {
+            b.setPointerCapture(e.pointerId);
+          } catch (_) {}
+          properties();
+          render();
         });
-        g.append(circle);
+        b.append(circle);
       });
-      b.append(g);
     });
 
-    // Stats
     const { msgs, byRail, maxMods } = computeWarnings();
     $('count').textContent = state().devices.length;
     $('wcount').textContent = state().wires.length;
@@ -620,10 +839,7 @@
       counts[d.type] = (counts[d.type] || 0) + 1;
     });
     $('bom').textContent = Object.entries(counts)
-      .map(([k, v]) => {
-        const t = spec(k);
-        return `${t ? t.name : k} × ${v}`;
-      })
+      .map(([k, v]) => `${(spec(k) || {}).name || k} × ${v}`)
       .join(' · ');
 
     const warn = $('warnings');
@@ -634,26 +850,98 @@
       warn.classList.remove('show');
       warn.textContent = '';
     }
+    updateSelBar();
   }
 
-  function properties() {
-    const d = state().devices.find((x) => x.id === selected);
-    $('props').hidden = !d;
-    $('empty').hidden = !!d;
-    if (d) {
-      const t = spec(d.type);
-      $('label').value = d.label;
-      $('rating').value = d.rating;
-      $('dev-size').textContent = t
-        ? `${deviceWidth(t)} × ${deviceHeight(t)} มม. · ${t.modules} โมดูล · ลึก ~${t.depthMm || '—'} มม.`
-        : '—';
+  function addBendAtPointer(w, pt) {
+    checkpoint();
+    const a = endpoint(w.a);
+    const b = endpoint(w.b);
+    if (!a || !b) return;
+    if (!w.bends.length) w.bends = defaultBends(a, b, w.route || 'vhv');
+
+    // Project onto closest segment of the rendered orthogonal polyline
+    const poly = wirePolyline(w);
+    let bestSeg = 0;
+    let bestT = 0.5;
+    let bestDist = Infinity;
+    let qx = pt.x;
+    let qy = pt.y;
+    for (let i = 0; i < poly.length - 1; i++) {
+      const p0 = poly[i];
+      const p1 = poly[i + 1];
+      const dx = p1.x - p0.x;
+      const dy = p1.y - p0.y;
+      const len2 = dx * dx + dy * dy || 1;
+      let t = ((pt.x - p0.x) * dx + (pt.y - p0.y) * dy) / len2;
+      t = Math.max(0.15, Math.min(0.85, t));
+      const x = p0.x + t * dx;
+      const y = p0.y + t * dy;
+      const dist = (pt.x - x) ** 2 + (pt.y - y) ** 2;
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestSeg = i;
+        bestT = t;
+        qx = x;
+        qy = y;
+      }
     }
+    const nx = Math.round(qx);
+    const ny = Math.round(qy);
+    // Map polyline vertex index → bends index (skip endpoint)
+    // Store as absolute bend; avoid duplicates
+    if (w.bends.some((bp) => Math.hypot(bp.x - nx, bp.y - ny) < 4)) {
+      $('status').textContent = 'มีมุมเลี้ยวใกล้จุดนี้อยู่แล้ว';
+      return;
+    }
+    // Insert ordered by distance along path
+    const along = bestSeg + bestT;
+    const scored = w.bends.map((bp, idx) => {
+      let seg = 0;
+      let t = 0;
+      let best = Infinity;
+      for (let i = 0; i < poly.length - 1; i++) {
+        const p0 = poly[i];
+        const p1 = poly[i + 1];
+        const dx = p1.x - p0.x;
+        const dy = p1.y - p0.y;
+        const len2 = dx * dx + dy * dy || 1;
+        let tt = ((bp.x - p0.x) * dx + (bp.y - p0.y) * dy) / len2;
+        tt = Math.max(0, Math.min(1, tt));
+        const x = p0.x + tt * dx;
+        const y = p0.y + tt * dy;
+        const dist = (bp.x - x) ** 2 + (bp.y - y) ** 2;
+        if (dist < best) {
+          best = dist;
+          seg = i;
+          t = tt;
+        }
+      }
+      return { bp, idx, along: seg + t };
+    });
+    scored.push({ bp: { x: nx, y: ny }, idx: -1, along });
+    scored.sort((u, v) => u.along - v.along);
+    w.bends = scored.map((s) => s.bp);
+    selectedWire = w.id;
+    selected = null;
+    render();
+    properties();
+    persist();
+    $('status').textContent = 'เพิ่มมุมเลี้ยวแล้ว · ลากจุดเขียวเพื่อจัดเส้น';
   }
 
   function connect(p) {
     if (!start) {
       start = p;
-      $('status').textContent = 'เลือกขั้วปลายทาง';
+      selected = null;
+      selectedWire = null;
+      $('status').textContent = 'เลือกขั้วปลายทาง · หรือ Escape เพื่อยกเลิก';
+      render();
+      properties();
+      return;
+    }
+    if (start.id === p.id && start.i === p.i) {
+      start = null;
       render();
       return;
     }
@@ -662,21 +950,57 @@
       return;
     }
     checkpoint();
-    state().wires.push({ id: crypto.randomUUID(), a: start, b: p, color: $('color').value });
+    const route = $('wire-route').value === 'hvh' ? 'hvh' : 'vhv';
+    const width = parseFloat($('wire-size').value) || 2.5;
+    state().wires.push({
+      id: crypto.randomUUID(),
+      a: start,
+      b: p,
+      color: $('color').value,
+      width,
+      route,
+      bends: []
+    });
     start = null;
+    selectedWire = state().wires[state().wires.length - 1].id;
+    selected = null;
     render();
+    properties();
     persist();
-    $('status').textContent = 'เชื่อมสายแล้ว · เลือกขั้วเพื่อเริ่มสายใหม่';
+    $('status').textContent = 'เชื่อมสายแล้ว · แตะสายเพื่อแก้มุมเลี้ยว หรือเลือกขั้วเพื่อเดินสายใหม่';
+  }
+
+  function findOpenSlot(t) {
+    const p = plate();
+    const w = deviceWidth(t);
+    const h = deviceHeight(t);
+    const ys = t.freePlace ? [p.y + 20, p.y + p.h / 2, p.y + p.h - h - 20] : railYs().map((ry) => ry - railOffset(t));
+    const gap = 4;
+    for (const y0 of ys) {
+      let x = p.x + 8;
+      while (x + w <= p.x + p.w - 4) {
+        const pos = clampDevice({ x, y: y0 }, t);
+        const overlap = state().devices.some((d) => {
+          const dt = spec(d.type);
+          if (!dt) return false;
+          const dw = deviceWidth(dt);
+          const dh = deviceHeight(dt);
+          return !(pos.x + w + gap <= d.x || d.x + dw + gap <= pos.x || pos.y + h + gap <= d.y || d.y + dh + gap <= pos.y);
+        });
+        if (!overlap) return pos;
+        x += MODULE;
+      }
+    }
+    return clampDevice({ x: p.x + 8, y: ys[0] }, t);
   }
 
   function add(type, x, y) {
     const t = spec(type);
     if (!t || !t.modes.includes(mode)) return;
     checkpoint();
-    const p = plate();
-    const sx = x != null ? x : p.x + 20 + (state().devices.length % 5) * (MODULE * 2 + 4);
-    const sy = y != null ? y : railYs()[Math.floor(state().devices.length / 5) % railYs().length] - deviceHeight(t) * 0.55;
-    const pos = clampDevice({ x: sx, y: sy }, t);
+    let pos;
+    if (x != null && y != null) pos = clampDevice({ x, y }, t);
+    else pos = findOpenSlot(t);
     const d = {
       id: crypto.randomUUID(),
       type,
@@ -687,6 +1011,7 @@
     };
     state().devices.push(d);
     selected = d.id;
+    selectedWire = null;
     render();
     properties();
     persist();
@@ -710,7 +1035,6 @@
       };
       filter.append(b);
     });
-
     const box = $('catalog');
     box.replaceChildren();
     devicesFor(mode)
@@ -719,6 +1043,8 @@
         const b = document.createElement('button');
         b.type = 'button';
         b.className = 'part';
+        b.datasetType = t.id;
+        b.dataset.type = t.id;
         b.draggable = true;
         b.innerHTML = `<span class="icon">${t.icon || '▥'}</span><span><strong>${t.name}</strong><small>${t.nameTh} · ${t.hint || ''} · ${deviceWidth(t)}มม.</small></span>`;
         b.onclick = () => add(t.id);
@@ -728,6 +1054,15 @@
         };
         box.append(b);
       });
+  }
+
+  function fillColorSelect(sel, current) {
+    sel.replaceChildren();
+    WIRE_COLORS[mode].forEach(([v, n]) => sel.add(new Option(n, v)));
+    if (current && ![...sel.options].some((o) => o.value.toLowerCase() === current.toLowerCase())) {
+      sel.add(new Option(current, current));
+    }
+    if (current) sel.value = [...sel.options].find((o) => o.value.toLowerCase() === current.toLowerCase())?.value || current;
   }
 
   function syncCabinetForm() {
@@ -749,9 +1084,7 @@
       if (p && p.id !== 'custom') {
         Object.assign(c, cabinetFromPreset(p));
         syncCabinetForm();
-      } else {
-        c.preset = 'custom';
-      }
+      } else c.preset = 'custom';
     } else {
       c.width = Math.max(150, Math.min(2000, +$('cab-w').value || c.width));
       c.height = Math.max(200, Math.min(2500, +$('cab-h').value || c.height));
@@ -761,7 +1094,6 @@
       c.preset = 'custom';
       $('preset').value = 'custom';
     }
-    // Re-clamp existing devices into new plate
     state().devices = state().devices.map((d) => {
       const t = spec(d.type);
       if (!t) return d;
@@ -779,66 +1111,82 @@
     C.presets
       .filter((p) => !p.mode || p.mode === mode || p.id === 'custom')
       .forEach((p) => {
-        const label = p.id === 'custom' ? p.name : `${p.name} (${p.w}×${p.h}×${p.d})`;
-        sel.add(new Option(label, p.id));
+        sel.add(new Option(p.id === 'custom' ? p.name : `${p.name} (${p.w}×${p.h}×${p.d})`, p.id));
       });
   }
 
   function setMode(m) {
     mode = m;
-    selected = start = null;
+    clearSelection();
     catFilter = 'all';
     ['AC', 'DC'].forEach((x) => $(x.toLowerCase()).classList.toggle('active', x === m));
     $('title').textContent = m === 'AC' ? 'ตู้ Consumer / Control' : 'ตู้ Solar Combiner';
-    $('subtitle').textContent =
-      m === 'AC' ? 'เบรกเกอร์ · คอนแทคเตอร์ · PLC · มิเตอร์' : 'DC MCB · ฟิวส์ · SPD · Isolator';
+    $('subtitle').textContent = m === 'AC' ? 'เบรกเกอร์ · คอนแทคเตอร์ · PLC · มิเตอร์' : 'DC MCB · ฟิวส์ · SPD · Isolator';
     fillPresets();
     syncCabinetForm();
     renderCatalog();
-    const colors =
-      m === 'AC'
-        ? [
-            ['#8b543c', 'L · น้ำตาล'],
-            ['#2878c8', 'N · น้ำเงิน'],
-            ['#47934a', 'PE · เขียว'],
-            ['#c9a227', 'Y · เหลือง']
-          ]
-        : [
-            ['#dd5353', '+ · แดง'],
-            ['#303b47', '− · ดำ'],
-            ['#47934a', 'PE · เขียว']
-          ];
-    $('color').replaceChildren();
-    colors.forEach(([v, n]) => $('color').add(new Option(n, v)));
-    $('legend').textContent = colors.map((x) => x[1]).join('  /  ');
+    fillColorSelect($('color'));
+    fillColorSelect($('wprop-color'));
+    $('legend').textContent = WIRE_COLORS[m].map((x) => x[1]).join('  /  ');
     render();
     properties();
   }
 
-  /* —— Pointer / tools —— */
+  /* —— Pointer —— */
   $('board').addEventListener('pointermove', (e) => {
     if (!drag) return;
-    const d = state().devices.find((x) => x.id === drag.id);
-    if (!d) return;
-    const t = spec(d.type);
     const pt = point(e);
-    const pos = clampDevice({ x: pt.x - drag.dx, y: pt.y - drag.dy }, t);
-    d.x = pos.x;
-    d.y = t.freePlace ? pos.y : pt.y - drag.dy; // live drag before snap
-    // soft clamp during drag
-    const p = plate();
-    d.x = Math.max(p.x + 5, Math.min(p.x + p.w - deviceWidth(t) - 5, d.x));
-    d.y = Math.max(p.y + 5, Math.min(p.y + p.h - deviceHeight(t) - 5, d.y));
-    render();
+    if (drag.kind === 'device') {
+      const d = state().devices.find((x) => x.id === drag.id);
+      if (!d) return;
+      const t = spec(d.type);
+      d.x = pt.x - drag.dx;
+      d.y = pt.y - drag.dy;
+      const p = plate();
+      d.x = Math.max(p.x + 4, Math.min(p.x + p.w - deviceWidth(t) - 4, d.x));
+      d.y = Math.max(p.y + 2, Math.min(p.y + p.h - deviceHeight(t) - 2, d.y));
+      render();
+    } else if (drag.kind === 'bend') {
+      const w = state().wires.find((x) => x.id === drag.wireId);
+      if (!w || !w.bends[drag.index]) return;
+      let x = Math.round(pt.x);
+      let y = Math.round(pt.y);
+      const a = endpoint(w.a);
+      const b = endpoint(w.b);
+      const chain = [a, ...w.bends, b];
+      const i = drag.index + 1;
+      const prev = chain[i - 1];
+      const next = chain[i + 1];
+      // Keep orthogonal to neighbors when possible
+      if (prev && next) {
+        const preferH = Math.abs(x - prev.x) + Math.abs(next.x - x) <= Math.abs(y - prev.y) + Math.abs(next.y - y);
+        if (w.route === 'hvh' || preferH) {
+          // lock to horizontal with prev or next if close
+          if (Math.abs(y - prev.y) < Math.abs(y - next.y)) y = Math.round(prev.y);
+          else y = Math.round(next.y);
+        } else {
+          if (Math.abs(x - prev.x) < Math.abs(x - next.x)) x = Math.round(prev.x);
+          else x = Math.round(next.x);
+        }
+      } else if (prev) {
+        if (Math.abs(x - prev.x) > Math.abs(y - prev.y)) y = Math.round(prev.y);
+        else x = Math.round(prev.x);
+      }
+      w.bends[drag.index] = { x, y };
+      render();
+    }
   });
+
   function endDrag() {
     if (!drag) return;
-    const d = state().devices.find((x) => x.id === drag.id);
-    if (d) {
-      const t = spec(d.type);
-      const pos = clampDevice(d, t);
-      d.x = pos.x;
-      d.y = pos.y;
+    if (drag.kind === 'device') {
+      const d = state().devices.find((x) => x.id === drag.id);
+      if (d) {
+        const t = spec(d.type);
+        const pos = clampDevice(d, t);
+        d.x = pos.x;
+        d.y = pos.y;
+      }
     }
     drag = null;
     render();
@@ -846,6 +1194,14 @@
   }
   $('board').addEventListener('pointerup', endDrag);
   $('board').addEventListener('pointercancel', endDrag);
+  $('board').addEventListener('pointerdown', (e) => {
+    // click empty board → deselect
+    if (e.target.classList?.contains('bg-hit') || e.target.classList?.contains('plate') || e.target.classList?.contains('duct') || e.target.classList?.contains('rail')) {
+      clearSelection();
+      properties();
+      render();
+    }
+  });
   $('board').addEventListener('dragover', (e) => e.preventDefault());
   $('board').addEventListener('drop', (e) => {
     e.preventDefault();
@@ -856,12 +1212,13 @@
     add(type, pt.x - deviceWidth(t) / 2, pt.y - deviceHeight(t) / 2);
   });
 
-  ['move', 'wire'].forEach((t) => {
-    $(t).onclick = () => {
-      tool = t;
+  ['move', 'wire'].forEach((tName) => {
+    $(tName).onclick = () => {
+      tool = tName;
       start = null;
-      ['move', 'wire'].forEach((x) => $(x).classList.toggle('active', x === t));
-      $('status').textContent = t === 'wire' ? 'แตะขั้วต้นทางและปลายทางเพื่อวาดสาย' : 'ลากอุปกรณ์เพื่อจัดวาง';
+      ['move', 'wire'].forEach((x) => $(x).classList.toggle('active', x === tName));
+      $('status').textContent =
+        tName === 'wire' ? 'แตะขั้วต้นทางและปลายทาง · เลือกสี/ขนาด/แนวจากแถบเครื่องมือ' : 'ลากอุปกรณ์เพื่อจัดวาง · แตะเพื่อเลือกแล้วลบได้';
       render();
     };
   });
@@ -879,7 +1236,17 @@
     };
   });
 
-  function remove() {
+  function removeSelected() {
+    if (selectedWire) {
+      checkpoint();
+      state().wires = state().wires.filter((w) => w.id !== selectedWire);
+      selectedWire = null;
+      render();
+      properties();
+      persist();
+      $('status').textContent = 'ลบสายแล้ว';
+      return;
+    }
     if (!selected) return;
     checkpoint();
     state().devices = state().devices.filter((d) => d.id !== selected);
@@ -888,12 +1255,78 @@
     render();
     properties();
     persist();
+    $('status').textContent = 'ลบอุปกรณ์แล้ว';
   }
-  $('remove').onclick = remove;
+  $('remove').onclick = removeSelected;
+  $('remove-wire').onclick = removeSelected;
+  $('sel-delete').onclick = removeSelected;
+
+  $('sel-route').onclick = () => {
+    const w = state().wires.find((x) => x.id === selectedWire);
+    if (!w) return;
+    checkpoint();
+    w.route = w.route === 'hvh' ? 'vhv' : 'hvh';
+    w.bends = [];
+    render();
+    properties();
+    persist();
+  };
+  $('sel-add-bend').onclick = () => {
+    const w = state().wires.find((x) => x.id === selectedWire);
+    if (!w) return;
+    const pts = wirePolyline(w);
+    if (pts.length < 2) return;
+    const mid = pts[Math.floor(pts.length / 2)];
+    addBendAtPointer(w, mid);
+  };
+  $('sel-clear-bends').onclick = () => {
+    const w = state().wires.find((x) => x.id === selectedWire);
+    if (!w) return;
+    checkpoint();
+    w.bends = [];
+    render();
+    properties();
+    persist();
+  };
+
+  $('wprop-color').onchange = () => {
+    const w = state().wires.find((x) => x.id === selectedWire);
+    if (!w) return;
+    checkpoint();
+    w.color = $('wprop-color').value;
+    $('color').value = w.color;
+    render();
+    persist();
+  };
+  $('wprop-size').onchange = () => {
+    const w = state().wires.find((x) => x.id === selectedWire);
+    if (!w) return;
+    checkpoint();
+    w.width = parseFloat($('wprop-size').value) || 2.5;
+    render();
+    persist();
+  };
+  $('wprop-route').onchange = () => {
+    const w = state().wires.find((x) => x.id === selectedWire);
+    if (!w) return;
+    checkpoint();
+    w.route = $('wprop-route').value === 'hvh' ? 'hvh' : 'vhv';
+    w.bends = [];
+    render();
+    properties();
+    persist();
+  };
+
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Delete' && !['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName)) remove();
+    if (['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
+    if (e.key === 'Delete' || e.key === 'Backspace') {
+      e.preventDefault();
+      removeSelected();
+    }
     if (e.key === 'Escape') {
       start = null;
+      clearSelection();
+      properties();
       render();
     }
   });
@@ -902,7 +1335,7 @@
     if (!history.length) return;
     const m = migrate(JSON.parse(history.pop()));
     if (m) data = m;
-    selected = start = null;
+    clearSelection();
     syncCabinetForm();
     renderCatalog();
     render();
@@ -914,7 +1347,7 @@
     checkpoint();
     const cab = cabinet();
     data[mode] = { devices: [], wires: [], cabinet: { ...cab } };
-    selected = start = null;
+    clearSelection();
     render();
     properties();
     persist();
@@ -956,6 +1389,7 @@
       r.setAttribute('fill', '#eef2f4');
       r.setAttribute('stroke', '#8fa0aa');
     });
+    s.querySelectorAll('.wire-hit, .bend-handle, .device-hit').forEach((n) => n.remove());
     download('panel-' + mode + '.svg', new XMLSerializer().serializeToString(s), 'image/svg+xml');
   };
   $('open').onclick = () => $('file').click();
@@ -969,7 +1403,7 @@
       if (!m) throw new Error('invalid');
       checkpoint();
       data = m;
-      selected = start = null;
+      clearSelection();
       fillPresets();
       syncCabinetForm();
       renderCatalog();
@@ -983,7 +1417,6 @@
     $('file').value = '';
   };
 
-  /* —— Mobile tabs —— */
   function setMobileTab(tab) {
     document.querySelectorAll('.mobile-tabs button').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
     $('panel-catalog').classList.toggle('open', tab === 'catalog');
@@ -994,10 +1427,6 @@
     b.onclick = () => setMobileTab(b.dataset.tab);
   });
 
-  window.addEventListener('resize', () => {
-    render();
-  });
-
-  // Init
+  window.addEventListener('resize', () => render());
   setMode('AC');
 })();
