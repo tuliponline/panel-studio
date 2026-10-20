@@ -446,25 +446,24 @@
     selectedWire = null;
     start = null;
   }
-  function updateSelBar() {
-    const bar = $('sel-bar');
+  /** Enable/disable always-present actions + floating chip (overlay only — no layout shift) */
+  function updateSelActions() {
     const d = selected && state().devices.find((x) => x.id === selected);
     const w = selectedWire && state().wires.find((x) => x.id === selectedWire);
-    const show = !!(d || w);
-    bar.hidden = !show;
-    bar.classList.toggle('show', show);
-    $('sel-route').hidden = !w;
-    $('sel-add-bend').hidden = !w;
-    $('sel-clear-bends').hidden = !w;
+    const has = !!(d || w);
+    $('sel-delete').disabled = !has;
+    $('sel-route').disabled = !w;
+    $('sel-add-bend').disabled = !w;
+    $('sel-clear-bends').disabled = !w;
+    const chip = $('float-sel');
+    chip.classList.toggle('show', has);
     if (d) {
       const t = spec(d.type);
-      $('sel-title').textContent = `อุปกรณ์: ${d.label}`;
-      $('sel-meta').textContent = t
-        ? `${t.nameTh} · ${deviceWidth(t)}×${deviceHeight(t)} มม. · แตะ «ลบ» หรือกด Delete/Backspace`
-        : 'แตะ «ลบ» เพื่อลบ';
+      $('float-label').textContent = d.label + (t ? ` · ${deviceWidth(t)}×${deviceHeight(t)} มม.` : '');
     } else if (w) {
-      $('sel-title').textContent = 'สายที่เลือก';
-      $('sel-meta').textContent = `มุมเลี้ยว ${w.bends.length} จุด · ลากจุดเขียวเพื่อจัดเส้น · สองครั้งที่เส้นเพื่อเพิ่มมุม`;
+      $('float-label').textContent = `สาย · มุม ${w.bends.length} · ลากจุดเขียวจัดเส้น`;
+    } else {
+      $('float-label').textContent = '—';
     }
   }
   function properties() {
@@ -487,7 +486,7 @@
       $('wprop-route').value = w.route || 'vhv';
       $('wprop-info').textContent = `จุดเลี้ยว ${w.bends.length} · ยึดกับขั้วอุปกรณ์เมื่อย้าย`;
     }
-    updateSelBar();
+    updateSelActions();
   }
 
   /* —— Render —— */
@@ -850,7 +849,7 @@
       warn.classList.remove('show');
       warn.textContent = '';
     }
-    updateSelBar();
+    updateSelActions();
   }
 
   function addBendAtPointer(w, pt) {
@@ -1260,6 +1259,7 @@
   $('remove').onclick = removeSelected;
   $('remove-wire').onclick = removeSelected;
   $('sel-delete').onclick = removeSelected;
+  $('float-delete').onclick = removeSelected;
 
   $('sel-route').onclick = () => {
     const w = state().wires.find((x) => x.id === selectedWire);
