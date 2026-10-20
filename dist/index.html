@@ -168,9 +168,15 @@ footer.panel-foot{font-size:10px;color:var(--muted);margin-top:16px;line-height:
 .tools .sel-actions button{min-height:36px;padding:6px 8px;font-size:12px;white-space:nowrap}
 .tools button.danger{color:var(--danger)}
 .tools button:disabled{opacity:.38}
+.color-chips{display:inline-flex;gap:4px;align-items:center}
+.color-chips button{
+  width:28px;height:28px;min-height:28px;padding:0;border-radius:50%;
+  border:2px solid #fff;box-shadow:0 0 0 1px var(--line);
+}
+.color-chips button.active{box-shadow:0 0 0 2px var(--brand)}
 /* Floating chip over canvas only — position:absolute, does not push layout */
 .float-sel{
-  position:absolute;z-index:5;left:10px;right:10px;bottom:10px;
+  position:absolute;z-index:5;left:10px;right:10px;bottom:52px;
   display:flex;align-items:center;gap:8px;flex-wrap:wrap;
   padding:8px 10px;border-radius:10px;
   background:rgba(255,255,255,.94);border:1px solid var(--line);
@@ -182,6 +188,24 @@ footer.panel-foot{font-size:10px;color:var(--muted);margin-top:16px;line-height:
 .float-sel .float-label{font-size:12px;font-weight:600;flex:1;min-width:80px}
 .float-sel button{min-height:36px;padding:6px 10px;font-size:12px;pointer-events:auto}
 .float-sel button.danger{color:var(--danger)}
+.trash-zone{
+  position:absolute;z-index:6;left:50%;bottom:10px;transform:translateX(-50%);
+  min-width:140px;padding:10px 16px;border-radius:999px;text-align:center;
+  background:rgba(255,255,255,.92);border:1.5px dashed #c9d4db;color:var(--muted);
+  font-size:12px;pointer-events:none;opacity:0;visibility:hidden;transition:opacity .12s,background .12s,border-color .12s;
+}
+.trash-zone.show{opacity:1;visibility:visible}
+.trash-zone.hot{background:#fde8e8;border-color:var(--danger);color:var(--danger);border-style:solid}
+.drag-ghost{
+  position:fixed;z-index:80;pointer-events:none;opacity:.88;
+  border:2px solid var(--brand);background:#fff;border-radius:6px;
+  box-shadow:0 8px 24px #1c2e3630;padding:4px 8px;font-size:11px;font-weight:600;
+  transform:translate(-50%,-50%);
+}
+.drag-ghost.bad{border-color:var(--danger);background:#fff5f5}
+.rail-hl{fill:#0a6b5c33;stroke:#0a6b5c;stroke-width:2}
+.rail-hl.bad{fill:#a63d3d33;stroke:#a63d3d}
+.drop-reject{stroke:#a63d3d;stroke-width:2;stroke-dasharray:4 3;fill:#a63d3d18}
 /* Warnings overlay the stage instead of inserting below it */
 .warn-banner{
   display:block;position:absolute;left:10px;right:10px;top:10px;z-index:4;
@@ -190,6 +214,13 @@ footer.panel-foot{font-size:10px;color:var(--muted);margin-top:16px;line-height:
   opacity:0;visibility:hidden;pointer-events:none;max-height:4.5em;overflow:hidden;
 }
 .warn-banner.show{opacity:1;visibility:visible;pointer-events:auto}
+.zoom-hud{
+  position:absolute;z-index:5;top:10px;right:10px;
+  display:flex;gap:4px;background:rgba(255,255,255,.92);border:1px solid var(--line);
+  border-radius:8px;padding:4px;
+}
+.zoom-hud button{min-height:32px;padding:4px 8px;font-size:12px}
+.sheet-handle{display:none}
 
 /* Mobile tabs */
 .mobile-tabs{
@@ -217,11 +248,27 @@ footer.panel-foot{font-size:10px;color:var(--muted);margin-top:16px;line-height:
     display:block;height:auto;min-height:calc(100dvh - var(--header-h) - var(--tab-h));
     padding-bottom:var(--tab-h);
   }
-  .panel-left,.panel-right{
+  .panel-left{
+    display:flex;flex-direction:column;
+    position:fixed;left:0;right:0;bottom:var(--tab-h);z-index:28;
+    top:auto;max-height:55dvh;border:0;border-radius:16px 16px 0 0;
+    padding:0 14px 14px;box-shadow:0 -8px 28px #1c2e3620;
+    transform:translateY(calc(100% - 28px));transition:transform .2s ease;
+    touch-action:pan-y;
+  }
+  .panel-left.open{transform:translateY(0)}
+  .panel-left .sheet-handle{
+    display:flex;justify-content:center;padding:10px 0 6px;cursor:grab;flex-shrink:0;
+  }
+  .panel-left .sheet-handle::before{
+    content:"";width:40px;height:4px;border-radius:4px;background:#c5d0d6;
+  }
+  .panel-left .sheet-body{overflow:auto;flex:1;min-height:0;-webkit-overflow-scrolling:touch}
+  .panel-right{
     display:none;position:fixed;top:var(--header-h);left:0;right:0;
     bottom:var(--tab-h);z-index:25;border:0;padding:14px 14px 24px;
   }
-  .panel-left.open,.panel-right.open{display:block}
+  .panel-right.open{display:block}
   .workspace{min-height:calc(100dvh - var(--header-h) - var(--tab-h));padding:10px}
   .stage-wrap{min-height:55dvh}
   .app-header{padding:8px 10px;height:auto;min-height:var(--header-h)}
@@ -229,6 +276,7 @@ footer.panel-foot{font-size:10px;color:var(--muted);margin-top:16px;line-height:
   .brand{font-size:16px}
   .catalog{grid-template-columns:1fr 1fr}
   .dim-grid{grid-template-columns:1fr 1fr}
+  .part{touch-action:none}
 }
 @media(max-width:480px){
   .catalog{grid-template-columns:1fr}
@@ -253,6 +301,8 @@ footer.panel-foot{font-size:10px;color:var(--muted);margin-top:16px;line-height:
 
 <div class="layout">
   <aside class="panel panel-left" id="panel-catalog" data-panel="catalog">
+    <div class="sheet-handle" id="sheet-handle" aria-hidden="true"></div>
+    <div class="sheet-body">
     <div class="section">
       <h2>ประเภทตู้</h2>
       <div class="modes">
@@ -293,7 +343,8 @@ footer.panel-foot{font-size:10px;color:var(--muted);margin-top:16px;line-height:
       <div class="cat-filter" id="cat-filter"></div>
       <div class="catalog" id="catalog"></div>
     </div>
-    <footer class="panel-foot">แต่ละโหมดแยกกัน · บันทึกอัตโนมัติในเบราว์เซอร์นี้<br>เพิ่มอุปกรณ์ได้ใน catalog.js</footer>
+    <footer class="panel-foot">ลากอุปกรณ์ลงตู้ · กดค้างบนมือถือเพื่อเริ่มลาก · บันทึกอัตโนมัติ<br>เพิ่มอุปกรณ์ได้ใน catalog.js</footer>
+    </div>
   </aside>
 
   <main class="workspace" id="panel-board" data-panel="board">
@@ -307,7 +358,8 @@ footer.panel-foot{font-size:10px;color:var(--muted);margin-top:16px;line-height:
     <div class="tools">
       <button type="button" id="move" class="active">↖ จัดวาง</button>
       <button type="button" id="wire">⌁ เดินสาย</button>
-      <select id="color" aria-label="ประเภทสาย"></select>
+      <span class="color-chips" id="color-chips" aria-label="สีสายด่วน"></span>
+      <select id="color" aria-label="ประเภทสาย" hidden></select>
       <select id="wire-size" aria-label="ขนาดสาย">
         <option value="2">บาง · 2</option>
         <option value="2.5" selected>ปกติ · 2.5</option>
@@ -318,7 +370,8 @@ footer.panel-foot{font-size:10px;color:var(--muted);margin-top:16px;line-height:
         <option value="vhv">แนว V–H–V</option>
         <option value="hvh">แนว H–V–H</option>
       </select>
-      <button type="button" id="undo">↶ ย้อน</button>
+      <button type="button" id="undo" title="Ctrl+Z">↶ ย้อน</button>
+      <button type="button" id="redo" title="Ctrl+Y" disabled>↷ ทำซ้ำ</button>
       <button type="button" id="clear">ล้างแบบ</button>
       <button type="button" id="zoom-fit" title="พอดีจอ">⊡ พอดี</button>
       <span class="sel-actions" aria-label="การกระทำกับที่เลือก">
@@ -330,17 +383,23 @@ footer.panel-foot{font-size:10px;color:var(--muted);margin-top:16px;line-height:
     </div>
     <div class="stage-wrap">
       <div class="warn-banner" id="warnings" role="status"></div>
+      <div class="zoom-hud">
+        <button type="button" id="zoom-out" title="ซูมออก">−</button>
+        <button type="button" id="zoom-in" title="ซูมเข้า">+</button>
+        <button type="button" id="zoom-fit2" title="พอดีจอ">⊡</button>
+      </div>
       <div class="stage-scroll" id="stage-scroll">
         <svg id="board" viewBox="0 0 600 800" role="img" aria-label="พื้นที่ออกแบบตู้ไฟ"></svg>
       </div>
+      <div class="trash-zone" id="trash-zone">🗑 ลากมาที่นี่เพื่อลบ</div>
       <div class="float-sel" id="float-sel" aria-live="polite">
         <span class="float-label" id="float-label">—</span>
         <button type="button" id="float-delete" class="danger">ลบ</button>
       </div>
     </div>
     <div class="legend" id="legend"></div>
-    <div class="status" id="status" aria-live="polite">เลือกอุปกรณ์จากด้านซ้ายเพื่อเริ่มจัดวาง</div>
-    <div class="hint">จัดวาง: ลากอุปกรณ์ · เดินสาย: แตะขั้วสองจุด · แตะสายเพื่อเลือก/ลากมุมเลี้ยว · Delete หรือ Backspace: ลบที่เลือก</div>
+    <div class="status" id="status" aria-live="polite">ลากอุปกรณ์จากแคตตาล็อกลงตู้ · ลากจากขั้วเพื่อเดินสาย</div>
+    <div class="hint">ลากวาง · ลากขั้ว→ขั้วเพื่อเดินสาย · ลากพื้นว่าง/สองนิ้วเพื่อเลื่อน · ล้อเมาส์/pinch ซูม · Ctrl+Z/Y ย้อน-ทำซ้ำ · ลากลงถังเพื่อลบ</div>
   </main>
 
   <aside class="panel panel-right" id="panel-props" data-panel="props">
