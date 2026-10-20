@@ -1,15 +1,35 @@
 /**
  * Panel Studio — แคตตาล็อกอุปกรณ์ (ข้อมูลขยายได้)
  * modules = ความกว้างหน่วย DIN (1 module ≈ 18 mm)
- * heightMm = ความสูงตัวเครื่องโดยประมาณบนราง
- * depthMm = ความลึกโดยประมาณ (ใช้เตือนเมื่อตู้ตื้นเกินไป)
+ * heightMm / depthMm / widthMm = ขนาดจริง (มม.) เมื่อทราบจากสเปกสินค้า
  * poles = จำนวนขั้ว (สำหรับขั้วต่อสาย)
+ * brand / model = แสดงใน UI ภาษาไทย
  */
 window.PANEL_CATALOG = {
   MODULE_MM: 18,
   DEVICE_BODY_H: 90,
 
   presets: [
+    {
+      id: 'glink-gwc-02',
+      name: 'GLINK GWC-02',
+      nameTh: 'ตู้แร็คติดผนัง GLINK GWC-02',
+      brand: 'GLINK',
+      model: 'GWC-02',
+      hint: 'เหล็ก 1 มม. · ประตูกระจก Tempered · ดำ/เทา',
+      w: 500,
+      h: 500,
+      d: 150,
+      rails: 2,
+      pitch: 140,
+      railLengthMm: 0,
+      ductTop: 30,
+      ductBottom: 30,
+      marginTop: 30,
+      marginBottom: 30,
+      marginSide: 25,
+      mode: 'AC'
+    },
     { id: 'cu-250', name: 'Consumer เล็ก', w: 250, h: 350, d: 100, rails: 2, pitch: 110, ductTop: 25, ductBottom: 25, marginTop: 25, marginBottom: 25, marginSide: 20, mode: 'AC' },
     { id: 'cu-300', name: 'Consumer กลาง', w: 300, h: 400, d: 120, rails: 2, pitch: 125, ductTop: 30, ductBottom: 30, marginTop: 30, marginBottom: 30, marginSide: 22, mode: 'AC' },
     { id: 'cu-400', name: 'ตู้ฝังผนัง 400', w: 400, h: 500, d: 200, rails: 3, pitch: 130, ductTop: 35, ductBottom: 35, mode: 'AC' },
@@ -22,6 +42,18 @@ window.PANEL_CATALOG = {
     { id: 'custom', name: 'กำหนดเอง', w: 600, h: 800, d: 250, rails: 4, pitch: 150, mode: null }
   ],
 
+  /**
+   * ราง DIN อลูมิเนียม TS35 (35 มม.) — ความยาวตัดขายจริง 5–20 ซม.
+   * 12 ขนาดตามท้องตลาด: 5,6,7,8,9,10,11,12,13,14,15,20 ซม.
+   */
+  dinRail: {
+    profile: 'TS35',
+    nameTh: 'ราง DIN อลูมิเนียม 35 มม. (TS35)',
+    brand: 'ทั่วไป',
+    thicknessMm: 7.5,
+    lengthsMm: [50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 200]
+  },
+
   /** ระยะขอบแผ่นติดตั้ง / รางสาย (มม.) */
   layoutDefaults: {
     marginTop: 35,
@@ -32,12 +64,99 @@ window.PANEL_CATALOG = {
     ductSide: 0,
     railPitch: 150,
     railThickness: 8,
-    /** ระยะจากขอบบนอุปกรณ์ถึงเส้นราง (รางผ่านกลางตัวเครื่องโดยประมาณ) */
+    railLengthMm: 0, // 0 = ใช้ความกว้างแผ่นติดตั้ง
     railOffsetRatio: 0.42
   },
 
   devices: [
-    /* —— ป้องกัน / ตัดตอน AC —— */
+    /* —— สินค้าจริงจากหน้างาน / มาร์เก็ตเพลส —— */
+    {
+      id: 'nano-ple42',
+      name: 'PLE42',
+      nameTh: 'Nano Plus RCBO PLE42 2P',
+      brand: 'Nano Plus',
+      model: 'PLE42',
+      cat: 'protection',
+      modes: ['AC'],
+      modules: 2,
+      poles: 2,
+      widthMm: 35.5,
+      heightMm: 77,
+      depthMm: 74.5,
+      icon: '◇',
+      hint: '16–63A · 30mA · 10kA · IEC 61009 · มอก.909-2548',
+      ratingDefault: '32A 30mA'
+    },
+    {
+      id: 'dz47-1p',
+      name: 'DZ47-63 1P',
+      nameTh: 'MCB DZ47-63 1P',
+      brand: 'RMCFOO',
+      model: 'DZ47-63',
+      cat: 'protection',
+      modes: ['AC'],
+      modules: 1,
+      poles: 1,
+      widthMm: 18,
+      heightMm: 80,
+      depthMm: 72,
+      icon: '▦',
+      hint: '1P · 3–63A · โค้ง C · AC 230/400V',
+      ratingDefault: '16A C'
+    },
+    {
+      id: 'dz47-2p',
+      name: 'DZ47-63 2P',
+      nameTh: 'MCB DZ47-63 2P',
+      brand: 'RMCFOO',
+      model: 'DZ47-63',
+      cat: 'protection',
+      modes: ['AC'],
+      modules: 2,
+      poles: 2,
+      widthMm: 36,
+      heightMm: 80,
+      depthMm: 75,
+      icon: '▦',
+      hint: '2P · 3–63A · โค้ง C · AC 230/400V',
+      ratingDefault: '32A C'
+    },
+    {
+      id: 'dz47-3p',
+      name: 'DZ47-63 3P',
+      nameTh: 'MCB DZ47-63 3P',
+      brand: 'RMCFOO',
+      model: 'DZ47-63',
+      cat: 'protection',
+      modes: ['AC'],
+      modules: 3,
+      poles: 3,
+      widthMm: 54,
+      heightMm: 80,
+      depthMm: 75,
+      icon: '▦',
+      hint: '3P · 3–63A · โค้ง C · AC 400V',
+      ratingDefault: '32A C'
+    },
+    {
+      id: 'dz47-4p',
+      name: 'DZ47-63 4P',
+      nameTh: 'MCB DZ47-63 4P',
+      brand: 'RMCFOO',
+      model: 'DZ47-63',
+      cat: 'protection',
+      modes: ['AC'],
+      modules: 4,
+      poles: 4,
+      widthMm: 72,
+      heightMm: 80,
+      depthMm: 75,
+      icon: '▦',
+      hint: '4P · 3–63A · โค้ง C · AC 400V',
+      ratingDefault: '40A C'
+    },
+
+    /* —— ป้องกัน / ตัดตอน AC (ทั่วไป) —— */
     { id: 'MCB', name: 'MCB 2P', nameTh: 'เบรกเกอร์ MCB 2P', cat: 'protection', modes: ['AC'], modules: 2, poles: 2, heightMm: 90, depthMm: 70, legacy: true, icon: '▦', hint: '2P · AC' },
     { id: 'mcb-1p', name: 'MCB 1P', nameTh: 'เบรกเกอร์ MCB 1P', cat: 'protection', modes: ['AC'], modules: 1, poles: 1, heightMm: 90, depthMm: 70, icon: '▦', hint: '1P · AC' },
     { id: 'mcb-3p', name: 'MCB 3P', nameTh: 'เบรกเกอร์ MCB 3P', cat: 'protection', modes: ['AC'], modules: 3, poles: 3, heightMm: 90, depthMm: 70, icon: '▦', hint: '3P · AC' },

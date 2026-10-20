@@ -38,6 +38,7 @@
       depth: p.d,
       rails: p.rails,
       pitch: p.pitch || L.railPitch,
+      railLengthMm: p.railLengthMm != null ? p.railLengthMm : L.railLengthMm || 0,
       preset: p.id,
       marginTop: p.marginTop ?? L.marginTop,
       marginBottom: p.marginBottom ?? L.marginBottom,
@@ -128,8 +129,24 @@
   function railYs() {
     return railLayout().ys;
   }
+  /** ความยาวรางจริง (มม.) — 0 หรือไม่ตั้ง = ใช้ความกว้างแผ่นติดตั้ง */
+  function railLengthMm() {
+    const c = cabinet();
+    const plateW = Math.max(40, plate().w - 10);
+    const len = Number(c.railLengthMm) || 0;
+    if (len <= 0) return plateW;
+    return Math.min(plateW, Math.max(50, len));
+  }
   function railUsableWidth() {
-    return plate().w - 10;
+    return railLengthMm();
+  }
+  function railModules() {
+    return Math.floor(railUsableWidth() / MODULE);
+  }
+  function railDrawX() {
+    const p = plate();
+    const rw = railUsableWidth();
+    return Math.round(p.x + (p.w - rw) / 2);
   }
   function snapToRail(y, t) {
     if (t.freePlace) return y;
@@ -143,11 +160,20 @@
     const p = plate();
     const w = deviceWidth(t);
     const h = deviceHeight(t);
-    let x = Math.max(p.x + 4, Math.min(p.x + p.w - w - 4, d.x));
+    let xMin = p.x + 4;
+    let xMax = p.x + p.w - w - 4;
+    // อุปกรณ์บนรางต้องอยู่ในช่วงความยาวราง DIN จริง
+    if (!t.freePlace) {
+      const rx = railDrawX();
+      const rw = railUsableWidth();
+      xMin = Math.max(xMin, rx);
+      xMax = Math.min(xMax, rx + rw - w);
+    }
+    if (xMax < xMin) xMax = xMin;
+    let x = Math.max(xMin, Math.min(xMax, d.x));
     let y = d.y;
     if (!t.freePlace) y = snapToRail(y, t);
     y = Math.max(p.y + 2, Math.min(p.y + p.h - h - 2, y));
-    x = Math.max(p.x + 4, Math.min(p.x + p.w - w - 4, x));
     return { x: Math.round(x), y: Math.round(y) };
   }
 
@@ -206,6 +232,7 @@
       depth: num(cab.depth, base.depth, 60, 800),
       rails: num(cab.rails, base.rails, 1, 12),
       pitch: num(cab.pitch, base.pitch, 80, 300),
+      railLengthMm: num(cab.railLengthMm, base.railLengthMm || 0, 0, 2000),
       preset: typeof cab.preset === 'string' ? cab.preset : 'custom',
       marginTop: num(cab.marginTop, base.marginTop, 10, 120),
       marginBottom: num(cab.marginBottom, base.marginBottom, 10, 120),
@@ -406,7 +433,8 @@
     const c = cabinet();
     const p = plate();
     const usable = railUsableWidth();
-    const maxMods = Math.floor(usable / MODULE);
+    const maxMods = railModules();
+    const rx = railDrawX();
     const ys = railYs();
     const byRail = ys.map(() => 0);
     for (const d of state().devices) {
@@ -421,6 +449,11 @@
         msgs.push(`«${d.label}» ลึก ${t.depthMm} มม. แต่ตู้ลึก ${c.depth} มม.`);
       }
       if (t.freePlace) continue;
+      if (w > usable + 0.5) {
+        msgs.push(`«${d.label}» กว้าง ${w} มม. แต่รางยาวเพียง ${Math.round(usable)} มม.`);
+      } else if (d.x < rx - 1 || d.x + w > rx + usable + 1) {
+        msgs.push(`«${d.label}» ยื่นนอกราง DIN (ยาว ${Math.round(usable)} มม.)`);
+      }
       const mid = d.y + h * 0.42;
       let best = 0;
       ys.forEach((ry, i) => {
@@ -430,7 +463,9 @@
     }
     byRail.forEach((mods, i) => {
       if (mods > maxMods) {
-        msgs.push(`ราง DIN ${String(i + 1).padStart(2, '0')} ใช้ ${mods} โมดูล จากที่มีได้ ~${maxMods}`);
+        msgs.push(
+          `ราง DIN ${String(i + 1).padStart(2, '0')} ใช้ ${mods} โมดูล จากที่มีได้ ${maxMods} (ราง ${Math.round(usable)} มม.)`
+        );
       }
     });
     const layout = railLayout();
@@ -477,7 +512,9 @@
       $('label').value = d.label;
       $('rating').value = d.rating;
       $('dev-size').textContent = t
-        ? `${deviceWidth(t)} × ${deviceHeight(t)} มม. · ${t.modules} โมดูล · ลึก ~${t.depthMm || '—'} มม.`
+        ? `${deviceWidth(t)} × ${deviceHeight(t)} × ${t.depthMm || '—'} มม. (ก×ส×ล) · ${t.modules} โมดูล${
+            t.brand ? ` · ${t.brand}${t.model ? ' ' + t.model : ''}` : ''
+          }`
         : '—';
     }
     if (w) {
@@ -565,9 +602,15 @@
 
     railYs().forEach((y, i) => {
       const rw = railUsableWidth();
-      const rx = p.x + 5;
+      const rx = railDrawX();
+      const mods = railModules();
+      const lenLabel = cabinet().railLengthMm > 0 ? `${Math.round(rw)} มม.` : `เต็มแผ่น ${Math.round(rw)} มม.`;
       b.append(
-        el('text', { x: rx, y: y - 10, fill: '#7d8f98', 'font-size': 10 }, `DIN ${String(i + 1).padStart(2, '0')} · ${Math.floor(rw / MODULE)} โมดูล`),
+        el(
+          'text',
+          { x: rx, y: y - 10, fill: '#7d8f98', 'font-size': 10 },
+          `DIN TS35 ${String(i + 1).padStart(2, '0')} · ${lenLabel} · ${mods} โมดูล`
+        ),
         el('rect', { class: 'rail', x: rx, y: y, width: rw, height: C.layoutDefaults.railThickness, rx: 1 }),
         el('line', { x1: rx, x2: rx + rw, y1: y + 3, y2: y + 3, stroke: '#f4f8fa', 'stroke-width': 1.5 })
       );
@@ -975,9 +1018,11 @@
     const h = deviceHeight(t);
     const ys = t.freePlace ? [p.y + 20, p.y + p.h / 2, p.y + p.h - h - 20] : railYs().map((ry) => ry - railOffset(t));
     const gap = 4;
+    const x0 = t.freePlace ? p.x + 8 : railDrawX();
+    const xLim = t.freePlace ? p.x + p.w - 4 : railDrawX() + railUsableWidth();
     for (const y0 of ys) {
-      let x = p.x + 8;
-      while (x + w <= p.x + p.w - 4) {
+      let x = x0;
+      while (x + w <= xLim) {
         const pos = clampDevice({ x, y: y0 }, t);
         const overlap = state().devices.some((d) => {
           const dt = spec(d.type);
@@ -990,7 +1035,7 @@
         x += MODULE;
       }
     }
-    return clampDevice({ x: p.x + 8, y: ys[0] }, t);
+    return clampDevice({ x: x0, y: ys[0] }, t);
   }
 
   function add(type, x, y) {
@@ -1003,8 +1048,8 @@
     const d = {
       id: crypto.randomUUID(),
       type,
-      label: t.name,
-      rating: 'ระบุพิกัด',
+      label: t.nameTh || t.name,
+      rating: t.ratingDefault || 'ระบุพิกัด',
       x: pos.x,
       y: pos.y
     };
@@ -1042,10 +1087,11 @@
         const b = document.createElement('button');
         b.type = 'button';
         b.className = 'part';
-        b.datasetType = t.id;
         b.dataset.type = t.id;
         b.draggable = true;
-        b.innerHTML = `<span class="icon">${t.icon || '▥'}</span><span><strong>${t.name}</strong><small>${t.nameTh} · ${t.hint || ''} · ${deviceWidth(t)}มม.</small></span>`;
+        const brand = t.brand ? `${t.brand}${t.model ? ' · ' + t.model : ''} · ` : '';
+        const size = `${deviceWidth(t)}×${deviceHeight(t)}×${t.depthMm || '—'} มม.`;
+        b.innerHTML = `<span class="icon">${t.icon || '▥'}</span><span><strong>${t.nameTh || t.name}</strong><small>${brand}${t.hint || ''} · ${size}</small></span>`;
         b.onclick = () => add(t.id);
         b.ondragstart = (e) => {
           e.dataTransfer.setData('text/plain', t.id);
@@ -1064,6 +1110,36 @@
     if (current) sel.value = [...sel.options].find((o) => o.value.toLowerCase() === current.toLowerCase())?.value || current;
   }
 
+  function fillRailLengthSelect() {
+    const sel = $('rail-length');
+    const cur = cabinet().railLengthMm || 0;
+    sel.replaceChildren();
+    sel.add(new Option('เต็มแผ่นติดตั้ง (ไม่จำกัดความยาวราง)', '0'));
+    (C.dinRail?.lengthsMm || []).forEach((mm) => {
+      const cm = mm / 10;
+      const mods = Math.floor(mm / MODULE);
+      sel.add(new Option(`TS35 · ${cm} ซม. (${mm} มม.) · ~${mods} โมดูล`, String(mm)));
+    });
+    sel.add(new Option('กำหนดเอง…', 'custom'));
+    const match = [...sel.options].some((o) => o.value === String(cur));
+    if (cur > 0 && !match) {
+      sel.value = 'custom';
+      $('rail-length-custom').value = cur;
+    } else {
+      sel.value = String(cur);
+      if (cur > 0) $('rail-length-custom').value = cur;
+    }
+    updateRailModInfo();
+  }
+
+  function updateRailModInfo() {
+    const mm = railUsableWidth();
+    const mods = railModules();
+    const c = cabinet();
+    const src = c.railLengthMm > 0 ? `ราง ${c.railLengthMm} มม.` : 'เต็มแผ่น';
+    $('rail-mod-info').textContent = `${mods} โมดูล · ${Math.round(mm)} มม. (${src})`;
+  }
+
   function syncCabinetForm() {
     const c = cabinet();
     $('cab-w').value = c.width;
@@ -1073,6 +1149,21 @@
     $('cab-pitch').value = c.pitch;
     const sel = $('preset');
     sel.value = [...sel.options].some((o) => o.value === c.preset) ? c.preset : 'custom';
+    fillRailLengthSelect();
+  }
+
+  function applyRailLengthFromForm() {
+    const c = cabinet();
+    const v = $('rail-length').value;
+    if (v === 'custom') {
+      const custom = Math.max(50, Math.min(2000, +$('rail-length-custom').value || c.railLengthMm || 100));
+      c.railLengthMm = custom;
+      $('rail-length-custom').value = custom;
+    } else {
+      c.railLengthMm = Math.max(0, Math.min(2000, +v || 0));
+      if (c.railLengthMm > 0) $('rail-length-custom').value = c.railLengthMm;
+    }
+    updateRailModInfo();
   }
 
   function applyCabinetFromForm(fromPreset) {
@@ -1090,6 +1181,7 @@
       c.depth = Math.max(60, Math.min(800, +$('cab-d').value || c.depth));
       c.rails = Math.max(1, Math.min(12, +$('cab-rails').value || c.rails));
       c.pitch = Math.max(80, Math.min(300, +$('cab-pitch').value || c.pitch));
+      applyRailLengthFromForm();
       c.preset = 'custom';
       $('preset').value = 'custom';
     }
@@ -1101,7 +1193,9 @@
     });
     render();
     persist();
-    $('status').textContent = `ตั้งตู้ ${c.width}×${c.height}×${c.depth} มม. · ${c.rails} ราง`;
+    updateRailModInfo();
+    const railTxt = c.railLengthMm > 0 ? ` · ราง ${c.railLengthMm} มม. (${railModules()} โมดูล)` : '';
+    $('status').textContent = `ตั้งตู้ ${c.width}×${c.height}×${c.depth} มม. · ${c.rails} ราง${railTxt}`;
   }
 
   function fillPresets() {
@@ -1110,7 +1204,11 @@
     C.presets
       .filter((p) => !p.mode || p.mode === mode || p.id === 'custom')
       .forEach((p) => {
-        sel.add(new Option(p.id === 'custom' ? p.name : `${p.name} (${p.w}×${p.h}×${p.d})`, p.id));
+        let label;
+        if (p.id === 'custom') label = p.name;
+        else if (p.brand) label = `${p.brand} ${p.model || p.name} (${p.w}×${p.d}×${p.h} · ก×ล×ส)`;
+        else label = `${p.name} (${p.w}×${p.h}×${p.d})`;
+        sel.add(new Option(label, p.id));
       });
   }
 
@@ -1357,6 +1455,17 @@
   ['cab-w', 'cab-h', 'cab-d', 'cab-rails', 'cab-pitch'].forEach((id) => {
     $(id).onchange = () => applyCabinetFromForm(false);
   });
+  $('rail-length').onchange = () => {
+    if ($('rail-length').value === 'custom') {
+      if (!$('rail-length-custom').value) $('rail-length-custom').value = '100';
+      $('rail-length-custom').focus();
+    }
+    applyCabinetFromForm(false);
+  };
+  $('rail-length-custom').onchange = () => {
+    $('rail-length').value = 'custom';
+    applyCabinetFromForm(false);
+  };
   $('zoom-fit').onclick = () => {
     render();
     $('stage-scroll').scrollTo({ top: 0, left: 0, behavior: 'smooth' });

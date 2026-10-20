@@ -273,10 +273,18 @@ footer.panel-foot{font-size:10px;color:var(--muted);margin-top:16px;line-height:
         <div class="field"><label for="cab-d">ลึก</label><input id="cab-d" type="number" min="60" max="800" step="10" inputmode="numeric"></div>
       </div>
       <div class="field-row" style="margin-top:8px">
-        <div class="field"><label for="cab-rails">ราง DIN</label><input id="cab-rails" type="number" min="1" max="12" step="1" inputmode="numeric"></div>
+        <div class="field"><label for="cab-rails">จำนวนราง</label><input id="cab-rails" type="number" min="1" max="12" step="1" inputmode="numeric"></div>
         <div class="field"><label for="cab-pitch">ระยะราง</label><input id="cab-pitch" type="number" min="80" max="300" step="5" inputmode="numeric"></div>
       </div>
-      <p class="muted" style="margin:8px 0 0">1 โมดูล DIN ≈ 18 มม. · จัดวางตามแผ่นติดตั้งจริง</p>
+      <div class="field" style="margin-top:8px">
+        <label for="rail-length">ความยาวราง DIN TS35 (อลูมิเนียม 35 มม.)</label>
+        <select id="rail-length"></select>
+      </div>
+      <div class="field-row" style="margin-top:8px">
+        <div class="field"><label for="rail-length-custom">ยาวกำหนดเอง (มม.)</label><input id="rail-length-custom" type="number" min="50" max="2000" step="10" inputmode="numeric" placeholder="เช่น 115"></div>
+        <div class="field"><label>โมดูล/ราง</label><div class="muted" id="rail-mod-info" style="padding-top:10px">—</div></div>
+      </div>
+      <p class="muted" style="margin:8px 0 0">1 โมดูล DIN = 18 มม. · ความยาวรางจำกัดจำนวนอุปกรณ์ต่อแถว</p>
     </div>
 
     <div class="section">
