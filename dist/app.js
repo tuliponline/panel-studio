@@ -1,18 +1,19 @@
-/* Panel Studio v6 — polyline free wires (straight segments) · drag-drop · pan/zoom */
+/* Panel Studio v7 — octilinear (45°) wires · drag-drop · pan/zoom */
 (() => {
   const $ = (id) => document.getElementById(id);
   const NS = 'http://www.w3.org/2000/svg';
   const C = window.PANEL_CATALOG;
   const MODULE = C.MODULE_MM;
   const STORAGE = 'panel-studio-v1';
-  const VERSION = 6;
+  const VERSION = 7;
   const LONG_PRESS_MS = 380;
   const MOVE_THRESH = 8;
   const CORNER_HOLD_MS = 400;
   const RDP_MIGRATE_EPS = 8;
-  const SOFT_AXIS_DEG = 3;
+  const GRID = 2.5;
   const TERM_SNAP = 22;
   const ROUTES = ['free', 'vhv', 'hvh', 'straight'];
+  const DEG45 = Math.PI / 4;
 
   const WIRE_COLORS = {
     AC: [
@@ -73,8 +74,6 @@
   let lastBendTap = 0;
   let pointers = new Map();
   let wireSketch = null; // polyline sketch: { from, corners, lastTapMs }
-  let angleSnapOn = false;
-  let shiftHeld = false;
 
   /* —— Catalog helpers —— */
   const devicesFor = (m) => C.devices.filter((d) => d.modes.includes(m));
@@ -323,11 +322,12 @@
         return { x: d.x + ((col + 1) * w) / (n + 1), y: d.y + (top ? 0 : h) };
       };
       wires.forEach((w) => {
-        if (normalizeRoute(w.route) !== 'free' || w.bends.length < 3) return;
         const a = portOf(w.a);
         const b = portOf(w.b);
-        if (a && b) w.bends = migrateFreehandBends(w.bends, a, b);
-        else if (w.bends.length >= 12) w.bends = ramerDouglasPeucker(dedupePts(w.bends), RDP_MIGRATE_EPS);
+        if (!a || !b) return;
+        const r = normalizeRoute(w.route);
+        if (r === 'vhv' || r === 'hvh') w.bends = defaultBends(a, b, r);
+        else w.bends = migrateFreehandBends(w.bends, a, b);
       });
       // soft clamp into current geometry
       const migrated = devices.map((d) => {
@@ -555,8 +555,7 @@
     const b = resolveEnd(w.b);
     if (!a || !b) return [];
     const route = normalizeRoute(w.route);
-    if (route === 'straight') return dedupePts([a, b]);
-    if (route === 'free') {
+    if (route === 'straight' || route === 'free') {
       const mids = (w.bends || []).map((p) => ({ x: p.x, y: p.y }));
       return dedupePts([a, ...mids, b]);
     }
@@ -582,37 +581,135 @@
     if (pts.length < 2) return '';
     return pts.map((p, i) => `${i ? 'L' : 'M'}${Math.round(p.x)},${Math.round(p.y)}`).join(' ');
   }
-  function wantAngleSnap() {
-    return angleSnapOn || shiftHeld;
+  function gridSnap(p) {
+    if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y)) return p;
+    return { x: Math.round(p.x / GRID) * GRID, y: Math.round(p.y / GRID) * GRID };
   }
-  /** Snap point relative to `from`: soft H/V (±3°) always; 0/45/90 when Shift or toggle. */
-  function snapSegmentPoint(from, to, forceOrtho) {
+  function isOctilinear(a, b, tol = 1.5) {
+    if (!a || !b) return false;
+    const dx = Math.abs(b.x - a.x);
+    const dy = Math.abs(b.y - a.y);
+    if (dx < tol || dy < tol) return true; // H or V
+    return Math.abs(dx - dy) < tol; // 45° diagonal
+  }
+  /** Snap `to` onto nearest 45° ray from `from` (keep approximate length). */
+  function snap45From(from, to) {
     if (!from || !to) return to;
-    let x = to.x;
-    let y = to.y;
-    const dx = x - from.x;
-    const dy = y - from.y;
+    const dx = to.x - from.x;
+    const dy = to.y - from.y;
     const len = Math.hypot(dx, dy);
-    if (len < 1) return { x: Math.round(from.x), y: Math.round(from.y) };
+    if (len < 0.5) return gridSnap({ x: from.x, y: from.y });
     const deg = (Math.atan2(dy, dx) * 180) / Math.PI;
-    const soft = SOFT_AXIS_DEG;
-    // soft near-horizontal / near-vertical
-    if (Math.abs(deg) <= soft || Math.abs(Math.abs(deg) - 180) <= soft) {
-      return { x: Math.round(x), y: Math.round(from.y) };
+    const snapped = Math.round(deg / 45) * 45;
+    const rad = (snapped * Math.PI) / 180;
+    return gridSnap({ x: from.x + Math.cos(rad) * len, y: from.y + Math.sin(rad) * len });
+  }
+  /** One joint so a→joint and joint→b are both 45°-aligned (octilinear stub). */
+  function octilinearJoint(a, b) {
+    if (!a || !b) return [];
+    const ga = gridSnap(a);
+    const gb = gridSnap(b);
+    if (isOctilinear(ga, gb)) return [];
+    const dx = gb.x - ga.x;
+    const dy = gb.y - ga.y;
+    const adx = Math.abs(dx);
+    const ady = Math.abs(dy);
+    const sx = Math.sign(dx) || 1;
+    const sy = Math.sign(dy) || 1;
+    // Cover the excess axis with an orthogonal stub, then diagonal the rest
+    if (adx > ady) return [gridSnap({ x: ga.x + sx * (adx - ady), y: ga.y })];
+    return [gridSnap({ x: ga.x, y: ga.y + sy * (ady - adx) })];
+  }
+  /**
+   * Force path a → corners → b to only use 45° segments.
+   * Snaps each corner from previous; inserts a joint before the end if needed.
+   */
+  function octilinearizePath(a, corners, b) {
+    if (!a || !b) return [];
+    const start = gridSnap(a);
+    const end = gridSnap(b);
+    const out = [];
+    let prev = start;
+    (corners || []).forEach((c) => {
+      const snapped = snap45From(prev, c);
+      if (Math.hypot(snapped.x - prev.x, snapped.y - prev.y) < GRID) return;
+      // if snap45From still not octilinear (length collapse), skip
+      if (!isOctilinear(prev, snapped)) return;
+      out.push(snapped);
+      prev = snapped;
+    });
+    if (!isOctilinear(prev, end)) {
+      const joints = octilinearJoint(prev, end);
+      joints.forEach((j) => {
+        if (Math.hypot(j.x - prev.x, j.y - prev.y) >= GRID) {
+          out.push(j);
+          prev = j;
+        }
+      });
     }
-    if (Math.abs(Math.abs(deg) - 90) <= soft) {
-      return { x: Math.round(from.x), y: Math.round(y) };
+    // Drop intermediate points that are colinear with neighbors (same 45° ray)
+    if (out.length < 2) return out;
+    const full = [start, ...out, end];
+    const kept = [full[0]];
+    for (let i = 1; i < full.length - 1; i++) {
+      const a = kept[kept.length - 1];
+      const b = full[i];
+      const c = full[i + 1];
+      const cross = (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x);
+      const dot = (b.x - a.x) * (c.x - b.x) + (b.y - a.y) * (c.y - b.y);
+      if (Math.abs(cross) < 1.5 && dot > 0) continue; // straight-through colinear
+      kept.push(b);
     }
-    if (forceOrtho || wantAngleSnap()) {
-      const step = 45;
-      const snapped = Math.round(deg / step) * step;
-      const rad = (snapped * Math.PI) / 180;
-      return {
-        x: Math.round(from.x + Math.cos(rad) * len),
-        y: Math.round(from.y + Math.sin(rad) * len)
-      };
+    kept.push(full[full.length - 1]);
+    return kept.slice(1, -1);
+  }
+  /** Dragging a corner: keep both adjacent segments at 45° (best ray intersection near pointer). */
+  function octilinearCornerAt(prev, next, prefer) {
+    if (!prev || !next) return gridSnap(prefer || prev);
+    const pref = prefer || { x: (prev.x + next.x) / 2, y: (prev.y + next.y) / 2 };
+    const dirs = [0, 1, 2, 3, 4, 5, 6, 7].map((i) => i * DEG45);
+    let best = null;
+    let bestDist = Infinity;
+    for (const a of dirs) {
+      const cax = Math.cos(a);
+      const say = Math.sin(a);
+      for (const b of dirs) {
+        const cbx = Math.cos(b);
+        const sby = Math.sin(b);
+        const det = cax * sby - say * cbx;
+        if (Math.abs(det) < 1e-8) continue;
+        // prev + t*dirA = next + s*dirB
+        const dx = next.x - prev.x;
+        const dy = next.y - prev.y;
+        const t = (dx * sby - dy * cbx) / det;
+        const s = (dx * say - dy * cax) / det;
+        if (t < GRID || s < GRID) continue;
+        const ix = prev.x + t * cax;
+        const iy = prev.y + t * say;
+        const pt = { x: ix, y: iy };
+        if (!isOctilinear(prev, pt) || !isOctilinear(pt, next)) continue;
+        const dist = Math.hypot(ix - pref.x, iy - pref.y);
+        if (dist < bestDist) {
+          bestDist = dist;
+          best = pt;
+        }
+      }
     }
-    return { x: Math.round(x), y: Math.round(y) };
+    if (best) return gridSnap(best);
+    return snap45From(prev, pref);
+  }
+  function rerouteWire(w) {
+    const a = resolveEnd(w.a);
+    const b = resolveEnd(w.b);
+    if (!a || !b) return;
+    const r = normalizeRoute(w.route);
+    if (r === 'vhv' || r === 'hvh') w.bends = defaultBends(a, b, r);
+    else w.bends = octilinearizePath(a, w.bends || [], b);
+  }
+  function rerouteConnected(deviceId) {
+    state().wires.forEach((w) => {
+      if (wireTouchesDevice(w, deviceId)) rerouteWire(w);
+    });
   }
   function lastCornerAnchor(fromEnd, corners) {
     if (corners && corners.length) return corners[corners.length - 1];
@@ -620,30 +717,25 @@
   }
   function previewPath(a, to, route, corners) {
     const r = normalizeRoute(route);
-    if (r === 'free') {
-      const mids = corners || [];
-      return pathD(dedupePts([a, ...mids, to]));
+    if (r === 'vhv' || r === 'hvh') {
+      const bends = defaultBends(a, to, r);
+      return pathD([a, ...bends, to]);
     }
-    if (r === 'straight') return pathD([a, to]);
-    const bends = defaultBends(a, to, r);
-    return pathD([a, ...bends, to]);
+    // free + straight: octilinear preview (rubber tip already 45°-snapped by caller)
+    const mids = octilinearizePath(a, corners || [], to);
+    return pathD(dedupePts([a, ...mids, to]));
   }
-  /** Collapse old freehand squiggles to corner polylines on load. */
+  /** Migrate legacy paths → octilinear corners. */
   function migrateFreehandBends(bends, a, b) {
-    if (!Array.isArray(bends) || bends.length < 3) return bends || [];
-    const pts = dedupePts([a, ...bends, b]);
-    if (pts.length < 4) return bends.map((p) => ({ x: Math.round(p.x), y: Math.round(p.y) }));
-    let short = 0;
-    for (let i = 1; i < pts.length; i++) {
-      if (Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y) < 16) short++;
+    let pts = Array.isArray(bends) ? bends.slice() : [];
+    if (pts.length >= 12) {
+      const all = dedupePts([a, ...pts, b]);
+      let simp = ramerDouglasPeucker(all, RDP_MIGRATE_EPS);
+      if (simp.length && a && Math.hypot(simp[0].x - a.x, simp[0].y - a.y) < 3) simp = simp.slice(1);
+      if (simp.length && b && Math.hypot(simp[simp.length - 1].x - b.x, simp[simp.length - 1].y - b.y) < 3) simp = simp.slice(0, -1);
+      pts = simp;
     }
-    // rewrite dense freehand-like paths OR any free wire with many points
-    const dense = short >= (pts.length - 1) * 0.3 || bends.length >= 12;
-    if (!dense) return bends.map((p) => ({ x: Math.round(p.x), y: Math.round(p.y) }));
-    let simp = ramerDouglasPeucker(pts, RDP_MIGRATE_EPS);
-    if (simp.length && a && Math.hypot(simp[0].x - a.x, simp[0].y - a.y) < 3) simp = simp.slice(1);
-    if (simp.length && b && Math.hypot(simp[simp.length - 1].x - b.x, simp[simp.length - 1].y - b.y) < 3) simp = simp.slice(0, -1);
-    return simp.map((p) => ({ x: Math.round(p.x), y: Math.round(p.y) }));
+    return octilinearizePath(a, pts, b);
   }
   function wireTouchesDevice(w, id) {
     return (w.a && w.a.id === id) || (w.b && w.b.id === id);
@@ -1093,9 +1185,9 @@
             b.setPointerCapture(e.pointerId);
           } catch (_) {}
           $('status').textContent =
-            route === 'free'
-              ? 'ลากเส้นตรง · ค้าง ~0.4วิ หรือปล่อยแล้วแตะเพื่อวางมุม · ปล่อยที่ขั้ว = เชื่อม'
-              : 'ลากไปยังขั้วปลายทาง หรือปล่อยว่าง';
+            route === 'vhv' || route === 'hvh'
+              ? 'ลากไปยังขั้วปลายทาง หรือปล่อยว่าง'
+              : 'ลากมุม 45° · ค้าง ~0.4วิ หรือปล่อยแล้วแตะเพื่อวางมุม · ปล่อยที่ขั้ว = เชื่อม';
           properties();
           render();
         };
@@ -1151,27 +1243,27 @@
     if (!a || !b) return;
     const route = normalizeRoute(w.route);
     if (!w.bends.length && (route === 'vhv' || route === 'hvh')) w.bends = defaultBends(a, b, route);
-    const nx = Math.round(pt.x);
-    const ny = Math.round(pt.y);
-    if (w.bends.some((bp) => Math.hypot(bp.x - nx, bp.y - ny) < 4)) return;
-    // insert nearest segment mid for free routes
     if (route === 'free' || route === 'straight') {
       const pts = wirePolyline(w);
-      let bestI = w.bends.length;
+      let bestI = 0;
       let bestD = Infinity;
       for (let i = 0; i < pts.length - 1; i++) {
-        const d = perpDist({ x: nx, y: ny }, pts[i], pts[i + 1]);
+        const d = perpDist(pt, pts[i], pts[i + 1]);
         if (d < bestD) {
           bestD = d;
-          bestI = Math.max(0, i); // bends index ≈ after start
+          bestI = i;
         }
       }
-      // map polyline index to bends index (polyline = a + bends + b)
+      const prev = pts[bestI];
+      const next = pts[bestI + 1];
+      const corner = octilinearCornerAt(prev, next, pt);
       const bi = Math.min(w.bends.length, Math.max(0, bestI));
-      w.bends.splice(bi, 0, { x: nx, y: ny });
+      w.bends.splice(bi, 0, corner);
       if (route === 'straight') w.route = 'free';
+      // Re-solve so neighbors stay 45°
+      w.bends = octilinearizePath(a, w.bends, b);
     } else {
-      w.bends.push({ x: nx, y: ny });
+      w.bends.push(gridSnap(pt));
     }
     selectedWire = w.id;
     selected = null;
@@ -1201,9 +1293,8 @@
       render();
       return;
     }
-    if (route === 'straight') bends = [];
-    else if (route === 'vhv' || route === 'hvh') bends = defaultBends(resolveEnd(from), resolveEnd(b), route);
-    else bends = cleanCorners(resolveEnd(from), bends, resolveEnd(b));
+    if (route === 'vhv' || route === 'hvh') bends = defaultBends(resolveEnd(from), resolveEnd(b), route);
+    else bends = octilinearizePath(resolveEnd(from), bends, resolveEnd(b));
     checkpoint();
     state().wires.push({
       id: crypto.randomUUID(),
@@ -1218,7 +1309,7 @@
     selected = null;
     wireSketch = null;
     updateWireDoneBtn();
-    $('status').textContent = b.free ? 'วางสายปลายอิสระแล้ว' : 'เชื่อมสายแล้ว · ลากมุมได้';
+    $('status').textContent = b.free ? 'วางสายปลายอิสระแล้ว' : 'เชื่อมสายแล้ว · มุม 45°';
     render();
     properties();
     persist();
@@ -1231,17 +1322,7 @@
     btn.hidden = !show;
   }
 
-  /** Drop near-colinear corners so segments stay meaningfully angled. */
-  function cleanCorners(start, corners, end) {
-    let pts = dedupePts([start, ...(corners || []), end]);
-    if (pts.length <= 2) return [];
-    pts = ramerDouglasPeucker(pts, 5);
-    if (pts.length && start && Math.hypot(pts[0].x - start.x, pts[0].y - start.y) < 2) pts = pts.slice(1);
-    if (pts.length && end && Math.hypot(pts[pts.length - 1].x - end.x, pts[pts.length - 1].y - end.y) < 2) pts = pts.slice(0, -1);
-    return pts;
-  }
-
-  /** Create wire from drag: `corners` are polyline bend points (straight segments). */
+  /** Create wire from drag: corners are 45° polyline bends (octilinear). */
   function createWireFromDrag(from, to, corners, route) {
     const a = resolveEnd(from);
     if (!a) return;
@@ -1251,15 +1332,15 @@
     if (to && to.id != null) {
       b = { id: to.id, i: to.i };
     } else if (to && (to.free || Number.isFinite(to.x))) {
-      b = { free: true, x: Math.round(to.x), y: Math.round(to.y) };
+      const snapped = gridSnap(to);
+      b = { free: true, x: snapped.x, y: snapped.y };
     } else return;
 
-    if (r === 'straight') {
-      bends = [];
-    } else if (r === 'vhv' || r === 'hvh') {
+    if (r === 'vhv' || r === 'hvh') {
       bends = defaultBends(a, resolveEnd(b), r);
     } else {
-      bends = cleanCorners(a, corners || [], resolveEnd(b));
+      // free + straight: always octilinear (45° only)
+      bends = octilinearizePath(a, corners || [], resolveEnd(b));
     }
     checkpoint();
     state().wires.push({
@@ -1288,15 +1369,15 @@
   function dropWireCorner(d, pt) {
     if (!d || d.kind !== 'wire') return;
     const anchor = lastCornerAnchor(d.from, d.corners);
-    const snapped = snapSegmentPoint(anchor, pt, false);
+    const snapped = snap45From(anchor, pt);
     const last = d.corners[d.corners.length - 1];
-    if (last && Math.hypot(last.x - snapped.x, last.y - snapped.y) < 4) return;
+    if (last && Math.hypot(last.x - snapped.x, last.y - snapped.y) < GRID * 2) return;
     const start = resolveEnd(d.from);
-    if (start && !d.corners.length && Math.hypot(start.x - snapped.x, start.y - snapped.y) < 4) return;
+    if (start && !d.corners.length && Math.hypot(start.x - snapped.x, start.y - snapped.y) < GRID * 2) return;
     d.corners.push(snapped);
     d.cur = snapped;
     d.lastHoldPt = snapped;
-    $('status').textContent = `วางมุม ${d.corners.length} · ลากต่อ / ค้างวางมุม / ปล่อยที่ขั้ว`;
+    $('status').textContent = `มุม 45° × ${d.corners.length} · ลากต่อ / ค้างวางมุม / ปล่อยที่ขั้ว`;
   }
 
   function addDevice(type, x, y, skipCheckpoint) {
@@ -1376,6 +1457,7 @@
       // live position (revert on drop if !fit)
       d.x = preview.x;
       d.y = t.freePlace ? Math.max(plate().y + 2, Math.min(plate().y + plate().h - deviceHeight(t) - 2, y)) : preview.y;
+      rerouteConnected(d.id);
       const trash = overTrash(e.clientX, e.clientY);
       $('trash-zone').classList.toggle('hot', trash);
       drag.toTrash = trash;
@@ -1398,15 +1480,15 @@
       if (pointers.size >= 2) return;
       const route = normalizeRoute(drag.route || currentRoute());
       const anchor = lastCornerAnchor(drag.from, drag.corners || []);
-      let cur = pt;
-      if (route === 'free') cur = snapSegmentPoint(anchor, pt, false);
-      else if (route === 'straight') cur = pt;
-      drag.cur = cur;
       drag.hover = findTerminalAt(pt, drag.from);
+      let cur = pt;
+      if (drag.hover) cur = { x: drag.hover.x, y: drag.hover.y };
+      else if (route === 'free' || route === 'straight') cur = snap45From(anchor, pt);
+      drag.cur = cur;
       if (Math.hypot(e.clientX - (drag.startClientX || 0), e.clientY - (drag.startClientY || 0)) > MOVE_THRESH) drag.moved = true;
 
       // Pause/hold (~400ms truly still) drops a corner, then rubber-band continues
-      if (route === 'free' && drag.moved) {
+      if ((route === 'free' || route === 'straight') && drag.moved && !drag.hover) {
         if (!drag.stillSince || Math.hypot(cur.x - drag.stillSince.x, cur.y - drag.stillSince.y) > 5) {
           drag.stillSince = { x: cur.x, y: cur.y, t: Date.now() };
           clearWireHoldTimer(drag);
@@ -1431,8 +1513,26 @@
         drag._holdClear();
       }
       const prev = w.bends[drag.index - 1] || resolveEnd(w.a);
-      const snapped = snapSegmentPoint(prev || { x: pt.x, y: pt.y }, pt, false);
+      const next = w.bends[drag.index + 1] || resolveEnd(w.b);
+      let snapped;
+      if (prev && next) snapped = octilinearCornerAt(prev, next, pt);
+      else if (prev) snapped = snap45From(prev, pt);
+      else snapped = gridSnap(pt);
       w.bends[drag.index] = snapped;
+      // If still not octilinear to next, insert/update a trailing joint after this bend
+      if (next && !isOctilinear(snapped, next)) {
+        const joints = octilinearJoint(snapped, next);
+        if (joints.length) {
+          // replace any auto joint immediately after, or insert
+          const j = joints[0];
+          if (w.bends[drag.index + 1] && drag._autoJoint) {
+            w.bends[drag.index + 1] = j;
+          } else {
+            w.bends.splice(drag.index + 1, 0, j);
+            drag._autoJoint = true;
+          }
+        }
+      }
       if (normalizeRoute(w.route) === 'straight') w.route = 'free';
       // drag off far → mark remove
       drag.remove = pt.x < -20 || pt.y < -20 || pt.x > cabinet().width + 20 || pt.y > cabinet().height + 20;
@@ -1444,9 +1544,13 @@
       if (snap) {
         w[drag.which] = { id: snap.id, i: snap.i };
         drag.hover = snap;
+        rerouteWire(w);
       } else {
-        w[drag.which] = { free: true, x: Math.round(pt.x), y: Math.round(pt.y) };
+        const other = drag.which === 'a' ? resolveEnd(w.b) : resolveEnd(w.a);
+        const snapped = other ? snap45From(other, pt) : gridSnap(pt);
+        w[drag.which] = { free: true, x: snapped.x, y: snapped.y };
         drag.hover = null;
+        rerouteWire(w);
       }
       render();
     } else if (drag.kind === 'rail') {
@@ -1546,21 +1650,20 @@
         persist();
         render();
         properties();
-      } else if (moved && route === 'free') {
-        // Lift-and-tap: drop corner at release, continue as sketch (don't finish free-end yet)
+      } else if (moved && (route === 'free' || route === 'straight')) {
+        // Lift-and-tap: drop 45° corner at release, continue as sketch
         const anchor = lastCornerAnchor(from, corners);
-        const snapped = snapSegmentPoint(anchor, rubber, false);
+        const snapped = snap45From(anchor, rubber);
         const next = corners.slice();
         const last = next[next.length - 1];
-        if (!last || Math.hypot(last.x - snapped.x, last.y - snapped.y) >= 4) next.push(snapped);
+        if (!last || Math.hypot(last.x - snapped.x, last.y - snapped.y) >= GRID * 2) next.push(snapped);
         wireSketch = { from, corners: next, lastTapMs: Date.now() };
         updateWireDoneBtn();
-        $('status').textContent = `มุม ${next.length} · แตะวางมุมต่อ / ลากต่อ / แตะขั้วหรือเสร็จ`;
+        $('status').textContent = `มุม 45° × ${next.length} · แตะ/ลากต่อ / แตะขั้วหรือเสร็จ`;
         render();
         properties();
       } else if (moved) {
-        // ortho/straight: free-ending at release
-        createWireFromDrag(from, { free: true, x: Math.round(rubber.x), y: Math.round(rubber.y) }, corners, route);
+        createWireFromDrag(from, { free: true, x: rubber.x, y: rubber.y }, corners, route);
         persist();
         render();
         properties();
@@ -1576,16 +1679,21 @@
         w.bends.splice(drag.index, 1);
         $('status').textContent = 'ลบมุมแล้ว';
       }
+      if (w) rerouteWire(w);
       drag = null;
       render();
       properties();
       persist();
     } else if (kind === 'free-end') {
+      const w = state().wires.find((x) => x.id === drag.wireId);
+      if (w) rerouteWire(w);
       drag = null;
       render();
       properties();
       persist();
     } else if (kind === 'rail') {
+      // devices glued to rail already moved — re-octilinearize their wires
+      state().wires.forEach((w) => rerouteWire(w));
       drag = null;
       render();
       persist();
@@ -1957,7 +2065,7 @@
     }
     $('status').textContent =
       tName === 'wire'
-        ? 'โหมดสาย: เส้นตรงทีละช่วง · ค้าง/แตะวางมุม · Shift หรือ ∠45° · สองนิ้วเลื่อน/ซูม'
+        ? 'โหมดสาย: หักมุมได้เฉพาะ 45° · ค้าง/แตะวางมุม · สองนิ้วเลื่อน/ซูม'
         : 'ลากอุปกรณ์/ราง · ลากขั้วเพื่อเดินสาย · ลากพื้นว่างเพื่อเลื่อนมุมมอง';
   }
 
@@ -1987,11 +2095,11 @@
         return;
       }
       const anchor = lastCornerAnchor(wireSketch.from, corners);
-      const snapped = snapSegmentPoint(anchor, pt, false);
+      const snapped = snap45From(anchor, pt);
       corners.push(snapped);
       wireSketch.lastTapMs = now;
       updateWireDoneBtn();
-      $('status').textContent = `มุม ${corners.length} · แตะขั้วปลาย / ดับเบิลแตะ / เสร็จ`;
+      $('status').textContent = `มุม 45° × ${corners.length} · แตะขั้วปลาย / ดับเบิลแตะ / เสร็จ`;
       render();
       return;
     }
@@ -2080,17 +2188,6 @@
   $('wire-done').onclick = () => {
     if (wireSketch) finishWireSketch(null);
   };
-  $('angle-snap').onclick = () => {
-    angleSnapOn = !angleSnapOn;
-    $('angle-snap').classList.toggle('active', angleSnapOn);
-    $('status').textContent = angleSnapOn ? 'ล็อกมุม 0°/45°/90° เปิด' : 'ล็อกมุมปิด (ใกล้แกนยัง snap ±3°)';
-  };
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Shift') shiftHeld = true;
-  });
-  document.addEventListener('keyup', (e) => {
-    if (e.key === 'Shift') shiftHeld = false;
-  });
   $('ac').onclick = () => setMode('AC');
   $('dc').onclick = () => setMode('DC');
   $('undo').onclick = undo;
@@ -2107,7 +2204,11 @@
     const i = order.indexOf(normalizeRoute(w.route));
     w.route = order[(i + 1) % order.length];
     if (w.route === 'vhv' || w.route === 'hvh') w.bends = defaultBends(resolveEnd(w.a), resolveEnd(w.b), w.route);
-    else if (w.route === 'straight') w.bends = [];
+    else {
+      const a = resolveEnd(w.a);
+      const b = resolveEnd(w.b);
+      w.bends = a && b ? octilinearizePath(a, w.bends, b) : [];
+    }
     render();
     properties();
     persist();
@@ -2161,7 +2262,11 @@
     checkpoint();
     w.route = normalizeRoute($('wprop-route').value);
     if (w.route === 'vhv' || w.route === 'hvh') w.bends = defaultBends(resolveEnd(w.a), resolveEnd(w.b), w.route);
-    else if (w.route === 'straight') w.bends = [];
+    else {
+      const a = resolveEnd(w.a);
+      const b = resolveEnd(w.b);
+      w.bends = a && b ? octilinearizePath(a, w.route === 'straight' ? [] : w.bends, b) : [];
+    }
     render();
     properties();
     persist();
