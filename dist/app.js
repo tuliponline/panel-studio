@@ -1,11 +1,11 @@
-/* Panel Studio v8 — octilinear wires · plate-mounted terminal busbar */
+/* Panel Studio v9 — octilinear wires · plate busbars (brass / I-din / copper) */
 (() => {
   const $ = (id) => document.getElementById(id);
   const NS = 'http://www.w3.org/2000/svg';
   const C = window.PANEL_CATALOG;
   const MODULE = C.MODULE_MM;
   const STORAGE = 'panel-studio-v1';
-  const VERSION = 8;
+  const VERSION = 9;
   const LONG_PRESS_MS = 380;
   const MOVE_THRESH = 8;
   const CORNER_HOLD_MS = 400;
@@ -14,18 +14,35 @@
   const TERM_SNAP = 22;
   const ROUTES = ['free', 'vhv', 'hvh', 'straight'];
   const DEG45 = Math.PI / 4;
-  /** Terminal busbar (plate-mounted N/PE bar) — real-ish mm */
-  const TBAR = {
-    pitch: 8.5,
-    sectionW: 6,
-    sectionH: 9,
-    footW: 14,
-    footLen: 20,
-    height: 25,
-    endInset: 5,
-    minHoles: 4,
-    maxHoles: 16,
-    presets: [4, 6, 8, 10, 12, 14, 16]
+  /** Plate-mounted busbar profiles (mm) */
+  const BAR_STYLES = {
+    brass: {
+      minHoles: 4,
+      maxHoles: 12,
+      presets: [4, 6, 8, 10, 12],
+      sections: {
+        '6x9': { sectionW: 6, sectionH: 9, pitch: 8.5, height: 25, footW: 14, footLen: 20, endInset: 5, stripW: 22 },
+        '8x12': { sectionW: 8, sectionH: 12, pitch: 11, height: 32, footW: 18, footLen: 24, endInset: 6, stripW: 28 }
+      }
+    },
+    idin: {
+      minHoles: 3,
+      maxHoles: 13,
+      presets: [3, 5, 7, 9, 11],
+      sections: {
+        default: { sectionW: 12, sectionH: 3.5, pitch: 10, height: 18, footW: 16, footLen: 14, endInset: 8, tabLen: 12, stripW: 16 }
+      },
+      mixedEnds: true
+    },
+    copper: {
+      minHoles: 4,
+      maxHoles: 12,
+      presets: [4, 5, 6, 8, 10],
+      ratingAmps: 110,
+      sections: {
+        default: { sectionW: 20, sectionH: 5, pitch: 18, height: 40, footW: 30, footLen: 30, endInset: 12, standoffR: 15, stripW: 32 }
+      }
+    }
   };
 
   const WIRE_COLORS = {
@@ -92,6 +109,26 @@
   const devicesFor = (m) => C.devices.filter((d) => d.modes.includes(m));
   const spec = (type) => C.devices.find((d) => d.id === type);
   const isTerminalBar = (t) => !!(t && t.isTerminalBar);
+  function barStyleOf(t) {
+    const s = (t && t.barStyle) || 'brass';
+    return BAR_STYLES[s] ? s : 'brass';
+  }
+  function barProfile(t, d) {
+    const style = barStyleOf(t);
+    const cfg = BAR_STYLES[style];
+    let secKey = 'default';
+    if (style === 'brass') {
+      secKey = (d && d.section) || (t && t.sectionDefault) || '6x9';
+      if (!cfg.sections[secKey]) secKey = '6x9';
+    }
+    const sec = cfg.sections[secKey];
+    let baseStyle = 'block';
+    if (style === 'brass') {
+      const b = (d && d.baseStyle) || (t && t.baseDefault) || 'block';
+      baseStyle = b === 'wing' ? 'wing' : 'block';
+    }
+    return { style, cfg, sec, secKey, baseStyle };
+  }
   function barRole(d, t) {
     const r = (d && d.role) || (t && t.roleDefault) || 'N';
     return r === 'PE' || r === 'generic' ? r : 'N';
@@ -99,33 +136,69 @@
   function barOrient(d) {
     return d && d.orient === 'v' ? 'v' : 'h';
   }
+  function barHoleLimits(t, d) {
+    const { cfg } = barProfile(t, d);
+    return { min: cfg.minHoles, max: cfg.maxHoles, presets: cfg.presets };
+  }
   function barHoles(d, t) {
+    const { min, max } = barHoleLimits(t, d);
     const n = Number(d && d.holes != null ? d.holes : t && t.holesDefault);
-    if (!Number.isFinite(n)) return 8;
-    return Math.max(TBAR.minHoles, Math.min(TBAR.maxHoles, Math.round(n)));
+    if (!Number.isFinite(n)) return Math.min(max, Math.max(min, 8));
+    return Math.max(min, Math.min(max, Math.round(n)));
   }
-  function barLenFromHoles(n) {
-    const holes = Math.max(TBAR.minHoles, Math.min(TBAR.maxHoles, n | 0));
-    const metal = (holes - 1) * TBAR.pitch + 2 * TBAR.endInset;
-    return Math.round(2 * TBAR.footLen + metal - 10);
+  function barLenFromHoles(n, t, d) {
+    const { cfg, sec, style, baseStyle } = barProfile(t, d);
+    const holes = Math.max(cfg.minHoles, Math.min(cfg.maxHoles, n | 0));
+    const metal = (holes - 1) * sec.pitch + 2 * sec.endInset;
+    if (style === 'idin') return Math.round(2 * sec.tabLen + metal);
+    if (style === 'copper') return Math.round(2 * sec.footLen * 0.55 + metal);
+    const wingExtra = baseStyle === 'wing' ? 8 : 0;
+    return Math.round(2 * sec.footLen + metal - 10 + wingExtra);
   }
-  function holesFromBarLen(len) {
+  function holesFromBarLen(len, t, d) {
+    const { cfg, sec, style } = barProfile(t, d);
     const L = Math.max(40, Number(len) || 40);
-    const metal = Math.max(TBAR.pitch, L - (2 * TBAR.footLen - 10));
-    const n = Math.round((metal - 2 * TBAR.endInset) / TBAR.pitch) + 1;
-    return Math.max(TBAR.minHoles, Math.min(TBAR.maxHoles, n));
+    const overhead = style === 'idin' ? 2 * sec.tabLen : style === 'copper' ? sec.footLen * 1.1 : 2 * sec.footLen - 10;
+    const metal = Math.max(sec.pitch, L - overhead);
+    const n = Math.round((metal - 2 * sec.endInset) / sec.pitch) + 1;
+    return Math.max(cfg.minHoles, Math.min(cfg.maxHoles, n));
   }
   function terminalBarGeom(d, t) {
     t = t || (d && spec(d.type));
+    const { style, cfg, sec, secKey, baseStyle } = barProfile(t, d);
     const holes = barHoles(d, t);
     let lengthMm = Number(d && d.lengthMm);
-    if (!Number.isFinite(lengthMm) || lengthMm < 40) lengthMm = barLenFromHoles(holes);
-    lengthMm = Math.max(barLenFromHoles(TBAR.minHoles), Math.min(240, Math.round(lengthMm)));
+    if (!Number.isFinite(lengthMm) || lengthMm < 40) lengthMm = barLenFromHoles(holes, t, d);
+    const maxLen = barLenFromHoles(cfg.maxHoles, t, d) + 40;
+    lengthMm = Math.max(barLenFromHoles(cfg.minHoles, t, d), Math.min(maxLen, Math.round(lengthMm)));
     const orient = barOrient(d);
     const role = barRole(d, t);
-    const w = orient === 'v' ? TBAR.height : lengthMm;
-    const h = orient === 'v' ? lengthMm : TBAR.height;
-    return { holes, lengthMm, orient, role, w, h, pitch: TBAR.pitch };
+    let footprint = sec.height;
+    if (style === 'brass' && baseStyle === 'wing') footprint = Math.max(footprint, sec.stripW);
+    if (style === 'copper') footprint = Math.max(sec.height, sec.stripW);
+    if (style === 'idin') footprint = Math.max(sec.height, sec.stripW);
+    const w = orient === 'v' ? footprint : lengthMm;
+    const h = orient === 'v' ? lengthMm : footprint;
+    return {
+      style,
+      holes,
+      lengthMm,
+      orient,
+      role,
+      w,
+      h,
+      pitch: sec.pitch,
+      sectionW: sec.sectionW,
+      sectionH: sec.sectionH,
+      sec,
+      secKey,
+      baseStyle,
+      mixedEnds: !!cfg.mixedEnds,
+      ratingAmps: cfg.ratingAmps || t.ratingAmps || 0,
+      presets: cfg.presets,
+      minHoles: cfg.minHoles,
+      maxHoles: cfg.maxHoles
+    };
   }
   const deviceWidth = (t, d) => (isTerminalBar(t) ? terminalBarGeom(d, t).w : t.widthMm || t.modules * MODULE);
   const deviceHeight = (t, d) => (isTerminalBar(t) ? terminalBarGeom(d, t).h : t.heightMm || C.DEVICE_BODY_H);
@@ -279,7 +352,7 @@
     if (e.free || (e.id == null && Number.isFinite(e.x) && Number.isFinite(e.y))) {
       return { free: true, x: Math.round(e.x), y: Math.round(e.y) };
     }
-    if (typeof e.id === 'string' && Number.isInteger(e.i) && e.i >= 0 && e.i < TBAR.maxHoles && devices.some((x) => x.id === e.id)) {
+    if (typeof e.id === 'string' && Number.isInteger(e.i) && e.i >= 0 && e.i < 16 && devices.some((x) => x.id === e.id)) {
       return { id: e.id, i: e.i };
     }
     return null;
@@ -354,9 +427,13 @@
         const nd = { id: d.id, type: d.type, label: String(d.label).slice(0, 40), rating: String(d.rating).slice(0, 40), x: d.x, y: d.y };
         if (isTerminalBar(t)) {
           nd.holes = barHoles(d, t);
-          nd.lengthMm = Number.isFinite(Number(d.lengthMm)) ? Math.round(Number(d.lengthMm)) : barLenFromHoles(nd.holes);
+          nd.lengthMm = Number.isFinite(Number(d.lengthMm)) ? Math.round(Number(d.lengthMm)) : barLenFromHoles(nd.holes, t, d);
           nd.orient = d.orient === 'v' ? 'v' : 'h';
           nd.role = barRole(d, t);
+          if (barStyleOf(t) === 'brass') {
+            nd.section = d.section === '8x12' ? '8x12' : '6x9';
+            nd.baseStyle = d.baseStyle === 'wing' ? 'wing' : 'block';
+          }
         }
         devices.push(nd);
       }
@@ -521,14 +598,16 @@
     if (isTerminalBar(t)) {
       const g = terminalBarGeom(d, t);
       const base = g.role === 'PE' ? 'PE' : g.role === 'N' ? 'N' : 'B';
-      const margin = 12;
-      const usable = Math.max(TBAR.pitch, g.lengthMm - 2 * margin);
+      const margin = g.style === 'copper' ? g.sec.footLen * 0.45 : g.style === 'idin' ? g.sec.tabLen + 2 : 12;
+      const usable = Math.max(g.pitch, g.lengthMm - 2 * margin);
+      const alongAxis = g.orient === 'h' ? g.h * 0.35 : g.w * 0.35;
       return Array.from({ length: g.holes }, (_, i) => {
         const along = margin + (g.holes === 1 ? usable / 2 : (i * usable) / (g.holes - 1));
+        const large = g.mixedEnds && (i === 0 || i === g.holes - 1);
         if (g.orient === 'h') {
-          return { x: d.x + along, y: d.y + 7, label: `${base}${i + 1}`, top: true };
+          return { x: d.x + along, y: d.y + alongAxis, label: `${base}${i + 1}`, top: true, large };
         }
-        return { x: d.x + 7, y: d.y + along, label: `${base}${i + 1}`, top: true };
+        return { x: d.x + alongAxis, y: d.y + along, label: `${base}${i + 1}`, top: true, large };
       });
     }
     const n = Math.max(1, t.poles | 0);
@@ -561,7 +640,8 @@
   function applyBarHoles(d, n, opts) {
     const t = spec(d.type);
     if (!isTerminalBar(t)) return false;
-    n = Math.max(TBAR.minHoles, Math.min(TBAR.maxHoles, Math.round(n)));
+    const { min, max } = barHoleLimits(t, d);
+    n = Math.max(min, Math.min(max, Math.round(n)));
     const doomed = wiresOnBarPorts(d.id, n);
     if (doomed.length) {
       const ok =
@@ -575,7 +655,7 @@
       $('status').textContent = `ลบสาย ${doomed.length} เส้นที่ช่องถูกตัดออก`;
     }
     d.holes = n;
-    if (!(opts && opts.keepLength)) d.lengthMm = barLenFromHoles(n);
+    if (!(opts && opts.keepLength)) d.lengthMm = barLenFromHoles(n, t, d);
     const pos = clampDevice(d, t);
     d.x = pos.x;
     d.y = pos.y;
@@ -602,7 +682,9 @@
     if (!isTerminalBar(t)) return;
     const g = terminalBarGeom(d, t);
     const role = g.role === 'PE' ? 'PE' : g.role === 'N' ? 'N' : 'บาร์';
-    d.rating = `${role} · ${g.holes} ช่อง`;
+    if (g.style === 'copper') d.rating = `${g.ratingAmps || 110}A · ${g.holes} จุด`;
+    else if (g.style === 'idin') d.rating = `${role} · ${g.holes} จุด`;
+    else d.rating = `${g.secKey} · ${role} · ${g.holes} ช่อง`;
   }
   function isFreeEnd(e) {
     return !!(e && (e.free || (e.id == null && Number.isFinite(e.x) && Number.isFinite(e.y))));
@@ -967,17 +1049,47 @@
       $('rating').value = d.rating;
       if (isTerminalBar(t)) {
         const g = terminalBarGeom(d, t);
-        $('dev-size').textContent = `${g.w} × ${g.h} × ${t.depthMm || 20} มม. · บาร์ ${TBAR.sectionW}×${TBAR.sectionH} มม. · ระยะรู ~${TBAR.pitch} มม. · ติดแผ่น (นอก DIN)`;
+        const sizeBits = [
+          `${g.w} × ${g.h} × ${t.depthMm || g.sec.stripW || 20} มม.`,
+          g.style === 'brass' ? `หน้าตัด ${g.sectionW}×${g.sectionH} มม.` : g.style === 'copper' ? `ทองแดง · ฉนวน Ø${g.sec.standoffR * 2}×35` : 'I-din นิเกิล',
+          `ระยะรู ~${g.pitch} มม.`,
+          'ติดแผ่น (นอก DIN)'
+        ];
+        if (g.ratingAmps) sizeBits.push(`${g.ratingAmps}A`);
+        $('dev-size').textContent = sizeBits.join(' · ');
         if (barBox) {
           barBox.hidden = false;
           $('bar-holes').value = String(g.holes);
+          $('bar-holes').min = String(g.minHoles);
+          $('bar-holes').max = String(g.maxHoles);
           $('bar-length').value = String(g.lengthMm);
           $('bar-role').value = g.role;
           $('bar-orient-h').classList.toggle('active', g.orient === 'h');
           $('bar-orient-v').classList.toggle('active', g.orient === 'v');
+          const secField = $('bar-section-field');
+          const baseField = $('bar-base-field');
+          const roleField = $('bar-role-field');
+          if (secField) {
+            secField.hidden = g.style !== 'brass';
+            if (g.style === 'brass') $('bar-section').value = g.secKey;
+          }
+          if (baseField) {
+            baseField.hidden = g.style !== 'brass';
+            if (g.style === 'brass') $('bar-base').value = g.baseStyle;
+          }
+          if (roleField) {
+            roleField.hidden = g.style === 'copper';
+            // copper keeps red standoffs; role still stored for label/BOM
+          }
+          const note = $('bar-note');
+          if (note) {
+            if (g.style === 'idin') note.textContent = 'สกรูปลายใหญ่ 2 ตัว + สกรูเล็กกลาง · ลากปลายบาร์เพิ่ม/ลดจุด · กริด 2.5 มม.';
+            else if (g.style === 'copper') note.textContent = 'บาร์ทองแดงบนฉนวนแดง · สลักหกเหลี่ยม · 110A · กริด 2.5 มม.';
+            else note.textContent = 'เลือกหน้าตัด 6×9 / 8×12 และฐานมาตรฐาน/ปีก · ลากปลายบาร์ · กริด 2.5 มม.';
+          }
           const presets = $('bar-presets');
           presets.replaceChildren();
-          TBAR.presets.forEach((n) => {
+          g.presets.forEach((n) => {
             const b = document.createElement('button');
             b.type = 'button';
             b.textContent = `${n}`;
@@ -1007,6 +1119,197 @@
       $('wprop-info').textContent = `แนว ${$('wprop-route').selectedOptions[0]?.text || ''} · จุด ${w.bends.length} · ลากจุด/ปลายอิสระได้`;
     }
     updateSelActions();
+  }
+
+  function appendTerminalBarVisual(g, d, t, geom, isSel, hit) {
+    const L = geom.lengthMm;
+    const sec = geom.sec;
+    const pts = ports(d);
+    if (geom.style === 'copper') {
+      const copper = '#b87333';
+      const copperDark = '#8a4f1f';
+      const red = '#e03131';
+      const r = sec.standoffR;
+      if (geom.orient === 'h') {
+        const cy = d.y + geom.h / 2;
+        const barY = cy - sec.sectionH / 2;
+        const barX = d.x + r * 0.7;
+        const barW = Math.max(10, L - r * 1.4);
+        g.append(
+          hit,
+          el('circle', { cx: d.x + r, cy, r, fill: red, stroke: '#c92a2a', 'stroke-width': 0.8 }),
+          el('circle', { cx: d.x + L - r, cy, r, fill: red, stroke: '#c92a2a', 'stroke-width': 0.8 }),
+          el('circle', { cx: d.x + r, cy, r: r * 0.35, fill: '#ffc9c9' }),
+          el('circle', { cx: d.x + L - r, cy, r: r * 0.35, fill: '#ffc9c9' }),
+          el('rect', { x: barX, y: barY, width: barW, height: sec.sectionH, rx: 1, fill: copper, stroke: isSel ? '#0a6b5c' : copperDark, 'stroke-width': isSel ? 1.8 : 0.9 })
+        );
+        pts.forEach((pt) => {
+          const s = 3.2;
+          g.append(
+            el('rect', { x: pt.x - s, y: barY - 1.5, width: s * 2, height: sec.sectionH + 3, rx: 0.5, fill: '#868e96', stroke: '#495057', 'stroke-width': 0.4 }),
+            el('polygon', { points: `${pt.x},${barY - 2.5} ${pt.x + 2.2},${barY + 1} ${pt.x - 2.2},${barY + 1}`, fill: '#adb5bd' })
+          );
+        });
+        g.append(el('text', { x: d.x + L / 2, y: d.y + geom.h - 2, 'text-anchor': 'middle', 'font-size': 7, fill: '#1a3038' }, (d.label || '110A').slice(0, 16)));
+      } else {
+        const cx = d.x + geom.w / 2;
+        const barX = cx - sec.sectionH / 2;
+        const barY = d.y + r * 0.7;
+        const barLen = Math.max(10, L - r * 1.4);
+        g.append(
+          hit,
+          el('circle', { cx, cy: d.y + r, r, fill: red, stroke: '#c92a2a', 'stroke-width': 0.8 }),
+          el('circle', { cx, cy: d.y + L - r, r, fill: red, stroke: '#c92a2a', 'stroke-width': 0.8 }),
+          el('rect', { x: barX, y: barY, width: sec.sectionH, height: barLen, rx: 1, fill: copper, stroke: isSel ? '#0a6b5c' : copperDark, 'stroke-width': isSel ? 1.8 : 0.9 })
+        );
+        pts.forEach((pt) => {
+          const s = 3.2;
+          g.append(el('rect', { x: barX - 1.5, y: pt.y - s, width: sec.sectionH + 3, height: s * 2, rx: 0.5, fill: '#868e96' }));
+        });
+        g.append(
+          el('text', {
+            x: d.x + geom.w - 1,
+            y: d.y + L / 2,
+            'text-anchor': 'middle',
+            'font-size': 7,
+            fill: '#1a3038',
+            transform: `rotate(-90 ${d.x + geom.w - 1} ${d.y + L / 2})`
+          }, (d.label || '110A').slice(0, 16))
+        );
+      }
+      return;
+    }
+
+    if (geom.style === 'idin') {
+      const nickel = '#ced4da';
+      const nickelDark = '#868e96';
+      const screw = '#e67700';
+      const tab = sec.tabLen;
+      if (geom.orient === 'h') {
+        const barY = d.y + 5;
+        const barH = Math.max(3, sec.sectionH + 2);
+        const deck = L - 2 * tab;
+        g.append(
+          hit,
+          el('path', {
+            d: `M ${d.x} ${d.y + geom.h - 2} L ${d.x + tab} ${d.y + geom.h - 2} L ${d.x + tab} ${barY} L ${d.x + tab + deck} ${barY} L ${d.x + tab + deck} ${d.y + geom.h - 2} L ${d.x + L} ${d.y + geom.h - 2} L ${d.x + L} ${d.y + geom.h} L ${d.x + L - tab + 2} ${d.y + geom.h} L ${d.x + L - tab + 2} ${barY + barH} L ${d.x + tab - 2} ${barY + barH} L ${d.x + tab - 2} ${d.y + geom.h} L ${d.x} ${d.y + geom.h} Z`,
+            fill: nickel,
+            stroke: isSel ? '#0a6b5c' : nickelDark,
+            'stroke-width': isSel ? 1.6 : 0.8
+          }),
+          el('ellipse', { cx: d.x + tab / 2, cy: d.y + geom.h - 3, rx: 3.5, ry: 1.6, fill: 'none', stroke: '#495057', 'stroke-width': 0.7 }),
+          el('ellipse', { cx: d.x + L - tab / 2, cy: d.y + geom.h - 3, rx: 3.5, ry: 1.6, fill: 'none', stroke: '#495057', 'stroke-width': 0.7 })
+        );
+        pts.forEach((pt) => {
+          const rad = pt.large ? 3.4 : 2.2;
+          g.append(
+            el('circle', { cx: pt.x, cy: barY + barH / 2, r: rad, fill: screw, stroke: '#9a5b00', 'stroke-width': 0.5 }),
+            el('line', { x1: pt.x - rad * 0.55, x2: pt.x + rad * 0.55, y1: barY + barH / 2, y2: barY + barH / 2, stroke: '#343a40', 'stroke-width': 0.6 }),
+            el('line', { x1: pt.x, x2: pt.x, y1: barY + barH / 2 - rad * 0.55, y2: barY + barH / 2 + rad * 0.55, stroke: '#343a40', 'stroke-width': 0.6 })
+          );
+        });
+        g.append(el('text', { x: d.x + L / 2, y: d.y + 4, 'text-anchor': 'middle', 'font-size': 7, fill: '#1a3038' }, (d.label || '').slice(0, 14)));
+      } else {
+        const barX = d.x + 5;
+        const barW = Math.max(3, sec.sectionH + 2);
+        const deck = L - 2 * tab;
+        g.append(
+          hit,
+          el('path', {
+            d: `M ${d.x + geom.w - 2} ${d.y} L ${d.x + geom.w - 2} ${d.y + tab} L ${barX} ${d.y + tab} L ${barX} ${d.y + tab + deck} L ${d.x + geom.w - 2} ${d.y + tab + deck} L ${d.x + geom.w - 2} ${d.y + L} L ${d.x + geom.w} ${d.y + L} L ${d.x + geom.w} ${d.y + L - tab + 2} L ${barX + barW} ${d.y + L - tab + 2} L ${barX + barW} ${d.y + tab - 2} L ${d.x + geom.w} ${d.y + tab - 2} L ${d.x + geom.w} ${d.y} Z`,
+            fill: nickel,
+            stroke: isSel ? '#0a6b5c' : nickelDark,
+            'stroke-width': isSel ? 1.6 : 0.8
+          })
+        );
+        pts.forEach((pt) => {
+          const rad = pt.large ? 3.4 : 2.2;
+          g.append(el('circle', { cx: barX + barW / 2, cy: pt.y, r: rad, fill: screw, stroke: '#9a5b00', 'stroke-width': 0.5 }));
+        });
+        g.append(
+          el('text', {
+            x: d.x + geom.w - 1,
+            y: d.y + L / 2,
+            'text-anchor': 'middle',
+            'font-size': 7,
+            fill: '#1a3038',
+            transform: `rotate(-90 ${d.x + geom.w - 1} ${d.y + L / 2})`
+          }, (d.label || '').slice(0, 14))
+        );
+      }
+      return;
+    }
+
+    // brass N/PE
+    const footColor = geom.role === 'PE' ? '#2f9e44' : geom.role === 'N' ? '#1c7ed6' : '#868e96';
+    const brass = '#c9a227';
+    const brassDark = '#a8841a';
+    const foot = sec.footW;
+    const barH = sec.sectionH;
+    const wing = geom.baseStyle === 'wing';
+    if (geom.orient === 'h') {
+      const barY = d.y + (geom.h - barH) / 2 - 1;
+      const barX = d.x + foot - 4;
+      const barW = Math.max(barH, L - 2 * foot + 8);
+      const footY = d.y + geom.h - (wing ? 14 : 12);
+      const footH = wing ? 14 : 12;
+      const footSpread = wing ? Math.max(foot + 6, geom.h * 0.9) : foot;
+      g.append(hit);
+      if (wing) {
+        g.append(
+          el('rect', { x: d.x - 2, y: footY, width: footSpread, height: footH, rx: 2, fill: footColor }),
+          el('rect', { x: d.x + L - footSpread + 2, y: footY, width: footSpread, height: footH, rx: 2, fill: footColor }),
+          el('circle', { cx: d.x + 4, cy: footY + footH / 2, r: 2.2, fill: '#e9ecef', stroke: '#495057', 'stroke-width': 0.6 }),
+          el('circle', { cx: d.x + L - 4, cy: footY + footH / 2, r: 2.2, fill: '#e9ecef', stroke: '#495057', 'stroke-width': 0.6 })
+        );
+      } else {
+        g.append(
+          el('rect', { x: d.x, y: footY, width: foot, height: footH, rx: 1.5, fill: footColor }),
+          el('rect', { x: d.x + L - foot, y: footY, width: foot, height: footH, rx: 1.5, fill: footColor }),
+          el('circle', { cx: d.x + foot / 2, cy: footY + footH / 2, r: 2.2, fill: '#e9ecef', stroke: '#495057', 'stroke-width': 0.6 }),
+          el('circle', { cx: d.x + L - foot / 2, cy: footY + footH / 2, r: 2.2, fill: '#e9ecef', stroke: '#495057', 'stroke-width': 0.6 })
+        );
+      }
+      g.append(el('rect', { x: barX, y: barY, width: barW, height: barH, rx: 1, fill: brass, stroke: isSel ? '#0a6b5c' : brassDark, 'stroke-width': isSel ? 1.8 : 0.8 }));
+      pts.forEach((pt) => {
+        g.append(
+          el('circle', { cx: pt.x, cy: barY + barH / 2, r: 2.4, fill: '#ced4da', stroke: '#495057', 'stroke-width': 0.5 }),
+          el('line', { x1: pt.x - 1.6, x2: pt.x + 1.6, y1: barY + 2, y2: barY + 2, stroke: '#343a40', 'stroke-width': 0.7 }),
+          el('line', { x1: pt.x, x2: pt.x, y1: barY + 1.2, y2: barY + 3.2, stroke: '#343a40', 'stroke-width': 0.7 })
+        );
+      });
+      g.append(el('text', { x: d.x + L / 2, y: d.y + geom.h - 1, 'text-anchor': 'middle', 'font-size': 7, fill: '#1a3038' }, (d.label || '').slice(0, 14)));
+    } else {
+      const barX = d.x + (geom.w - barH) / 2 - 1;
+      const barY = d.y + foot - 4;
+      const barLen = Math.max(barH, L - 2 * foot + 8);
+      g.append(hit);
+      if (wing) {
+        g.append(
+          el('rect', { x: d.x + geom.w - 14, y: d.y - 2, width: 14, height: foot + 6, rx: 2, fill: footColor }),
+          el('rect', { x: d.x + geom.w - 14, y: d.y + L - foot - 4, width: 14, height: foot + 6, rx: 2, fill: footColor })
+        );
+      } else {
+        g.append(
+          el('rect', { x: d.x + geom.w - 12, y: d.y, width: 12, height: foot, rx: 1.5, fill: footColor }),
+          el('rect', { x: d.x + geom.w - 12, y: d.y + L - foot, width: 12, height: foot, rx: 1.5, fill: footColor })
+        );
+      }
+      g.append(el('rect', { x: barX, y: barY, width: barH, height: barLen, rx: 1, fill: brass, stroke: isSel ? '#0a6b5c' : brassDark, 'stroke-width': isSel ? 1.8 : 0.8 }));
+      pts.forEach((pt) => {
+        g.append(el('circle', { cx: barX + barH / 2, cy: pt.y, r: 2.4, fill: '#ced4da', stroke: '#495057', 'stroke-width': 0.5 }));
+      });
+      g.append(
+        el('text', {
+          x: d.x + geom.w - 1,
+          y: d.y + L / 2,
+          'text-anchor': 'middle',
+          'font-size': 7,
+          fill: '#1a3038',
+          transform: `rotate(-90 ${d.x + geom.w - 1} ${d.y + L / 2})`
+        }, (d.label || '').slice(0, 14))
+      );
+    }
   }
 
   /* —— Render —— */
@@ -1124,66 +1427,8 @@
 
       if (isTerminalBar(t)) {
         const geom = terminalBarGeom(d, t);
-        const footColor = geom.role === 'PE' ? '#2f9e44' : geom.role === 'N' ? '#1c7ed6' : '#868e96';
-        const brass = '#c9a227';
-        const brassDark = '#a8841a';
-        const L = geom.lengthMm;
-        const foot = TBAR.footW;
-        const barH = TBAR.sectionH;
-        const barT = TBAR.sectionW;
-        if (geom.orient === 'h') {
-          const barY = d.y + 4;
-          const barX = d.x + foot - 4;
-          const barW = Math.max(barT, L - 2 * foot + 8);
-          g.append(
-            hit,
-            el('rect', { x: d.x, y: d.y + h - 12, width: foot, height: 12, rx: 1.5, fill: footColor, stroke: '#14532d22', 'stroke-width': 0.5 }),
-            el('rect', { x: d.x + L - foot, y: d.y + h - 12, width: foot, height: 12, rx: 1.5, fill: footColor, stroke: '#14532d22', 'stroke-width': 0.5 }),
-            el('circle', { cx: d.x + foot / 2, cy: d.y + h - 6, r: 2.2, fill: '#e9ecef', stroke: '#495057', 'stroke-width': 0.6 }),
-            el('circle', { cx: d.x + L - foot / 2, cy: d.y + h - 6, r: 2.2, fill: '#e9ecef', stroke: '#495057', 'stroke-width': 0.6 }),
-            el('rect', { x: barX, y: barY, width: barW, height: barH, rx: 1, fill: brass, stroke: isSel ? '#0a6b5c' : brassDark, 'stroke-width': isSel ? 1.8 : 0.8 })
-          );
-          ports(d).forEach((pt) => {
-            g.append(
-              el('circle', { cx: pt.x, cy: barY + barH / 2, r: 2.4, fill: '#ced4da', stroke: '#495057', 'stroke-width': 0.5 }),
-              el('line', { x1: pt.x - 1.6, x2: pt.x + 1.6, y1: barY + 2, y2: barY + 2, stroke: '#343a40', 'stroke-width': 0.7 }),
-              el('line', { x1: pt.x, x2: pt.x, y1: barY + 1.2, y2: barY + 3.2, stroke: '#343a40', 'stroke-width': 0.7 })
-            );
-          });
-          g.append(
-            el('text', { x: d.x + L / 2, y: d.y + h - 1, 'text-anchor': 'middle', 'font-size': 7, fill: '#1a3038' }, (d.label || '').slice(0, 14))
-          );
-        } else {
-          const barX = d.x + 4;
-          const barY = d.y + foot - 4;
-          const barLen = Math.max(barT, L - 2 * foot + 8);
-          g.append(
-            hit,
-            el('rect', { x: d.x + w - 12, y: d.y, width: 12, height: foot, rx: 1.5, fill: footColor }),
-            el('rect', { x: d.x + w - 12, y: d.y + L - foot, width: 12, height: foot, rx: 1.5, fill: footColor }),
-            el('circle', { cx: d.x + w - 6, cy: d.y + foot / 2, r: 2.2, fill: '#e9ecef', stroke: '#495057', 'stroke-width': 0.6 }),
-            el('circle', { cx: d.x + w - 6, cy: d.y + L - foot / 2, r: 2.2, fill: '#e9ecef', stroke: '#495057', 'stroke-width': 0.6 }),
-            el('rect', { x: barX, y: barY, width: barH, height: barLen, rx: 1, fill: brass, stroke: isSel ? '#0a6b5c' : brassDark, 'stroke-width': isSel ? 1.8 : 0.8 })
-          );
-          ports(d).forEach((pt) => {
-            g.append(
-              el('circle', { cx: barX + barH / 2, cy: pt.y, r: 2.4, fill: '#ced4da', stroke: '#495057', 'stroke-width': 0.5 }),
-              el('line', { x1: barX + 2, x2: barX + 2, y1: pt.y - 1.6, y2: pt.y + 1.6, stroke: '#343a40', 'stroke-width': 0.7 }),
-              el('line', { x1: barX + 1.2, x2: barX + 3.2, y1: pt.y, y2: pt.y, stroke: '#343a40', 'stroke-width': 0.7 })
-            );
-          });
-          g.append(
-            el('text', {
-              x: d.x + w - 1,
-              y: d.y + L / 2,
-              'text-anchor': 'middle',
-              'font-size': 7,
-              fill: '#1a3038',
-              transform: `rotate(-90 ${d.x + w - 1} ${d.y + L / 2})`
-            }, (d.label || '').slice(0, 14))
-          );
-        }
-        g.querySelectorAll('rect:not(.device-hit), circle, line, text').forEach((n) => {
+        appendTerminalBarVisual(g, d, t, geom, isSel, hit);
+        g.querySelectorAll('rect:not(.device-hit):not(.bar-resize), circle, line, text, path, ellipse, polygon').forEach((n) => {
           n.style.pointerEvents = 'none';
         });
         if (isSel) {
@@ -1495,9 +1740,15 @@
         const t = spec(k) || {};
         const name = t.nameTh || t.name || k;
         if (isTerminalBar(t)) {
-          const sample = state().devices.find((d) => d.type === k);
-          const holes = sample ? barHoles(sample, t) : t.holesDefault || 8;
-          return `${name} (${holes} จุด) × ${v}`;
+          const samples = state().devices.filter((d) => d.type === k);
+          const parts = samples.map((s) => {
+            const g = terminalBarGeom(s, t);
+            if (g.style === 'copper') return `${g.ratingAmps || 110}A · ${g.holes} จุด`;
+            if (g.style === 'idin') return `${g.holes} จุด`;
+            return `${g.secKey} · ${g.baseStyle === 'wing' ? 'ปีก' : 'มาตรฐาน'} · ${g.holes} ช่อง`;
+          });
+          const uniq = [...new Set(parts)];
+          return uniq.length === 1 ? `${name} (${uniq[0]}) × ${v}` : `${name} × ${v} [${uniq.join('; ')}]`;
         }
         return `${name} × ${v}`;
       })
@@ -1687,11 +1938,20 @@
       y
     };
     if (isTerminalBar(t)) {
+      const style = barStyleOf(t);
       d.holes = t.holesDefault || 8;
-      d.lengthMm = barLenFromHoles(d.holes);
       d.orient = 'h';
-      d.role = t.roleDefault || 'N';
-      d.label = d.role === 'PE' ? 'บาร์ PE' : d.role === 'N' ? 'บาร์ N' : 'บาร์เทอร์มินัล';
+      d.role = t.roleDefault || (style === 'brass' ? 'N' : 'PE');
+      if (style === 'brass') {
+        d.section = t.sectionDefault === '8x12' ? '8x12' : '6x9';
+        d.baseStyle = t.baseDefault === 'wing' ? 'wing' : 'block';
+        d.label = d.role === 'PE' ? 'บาร์ PE' : 'บาร์ N';
+      } else if (style === 'idin') {
+        d.label = 'บาร์กราวด์ I-din';
+      } else {
+        d.label = 'บาร์ทองแดง 110A';
+      }
+      d.lengthMm = barLenFromHoles(d.holes, t, d);
       syncBarRating(d);
     }
     const pos = clampDevice(d, t);
@@ -1774,11 +2034,12 @@
       const d = state().devices.find((x) => x.id === drag.id);
       const t = d && spec(d.type);
       if (!d || !isTerminalBar(t)) return;
+      const lim = barHoleLimits(t, d);
       const delta = drag.orient === 'h' ? pt.x - drag.startX : pt.y - drag.startY;
-      const nextLen = Math.max(barLenFromHoles(TBAR.minHoles), Math.min(240, drag.startLen + delta));
-      const nextHoles = holesFromBarLen(nextLen);
-      d.lengthMm = barLenFromHoles(nextHoles);
+      const nextLen = Math.max(barLenFromHoles(lim.min, t, d), Math.min(barLenFromHoles(lim.max, t, d) + 40, drag.startLen + delta));
+      const nextHoles = holesFromBarLen(nextLen, t, d);
       d.holes = nextHoles;
+      d.lengthMm = barLenFromHoles(nextHoles, t, d);
       const pos = clampDevice(d, t);
       d.x = pos.x;
       d.y = pos.y;
@@ -2209,8 +2470,18 @@
   function findOpenSlot(t) {
     const p = plate();
     const stub = isTerminalBar(t)
-      ? { type: t.id, holes: t.holesDefault || 8, lengthMm: barLenFromHoles(t.holesDefault || 8), orient: 'h', role: t.roleDefault || 'N', x: 0, y: 0 }
+      ? {
+          type: t.id,
+          holes: t.holesDefault || 8,
+          orient: 'h',
+          role: t.roleDefault || 'N',
+          section: t.sectionDefault || '6x9',
+          baseStyle: t.baseDefault || 'block',
+          x: 0,
+          y: 0
+        }
       : { x: 0, y: 0 };
+    if (isTerminalBar(t)) stub.lengthMm = barLenFromHoles(stub.holes, t, stub);
     const w = deviceWidth(t, stub);
     const h = deviceHeight(t, stub);
     const step = t.freePlace ? Math.max(GRID * 4, 10) : MODULE;
@@ -2639,14 +2910,55 @@
   $('bar-length').onchange = () => {
     const d = selectedBar();
     if (!d) return;
+    const t = spec(d.type);
     checkpoint();
-    const len = Math.max(40, Math.min(240, Math.round(Number($('bar-length').value) || barLenFromHoles(d.holes))));
+    const lim = barHoleLimits(t, d);
+    const len = Math.max(
+      barLenFromHoles(lim.min, t, d),
+      Math.min(barLenFromHoles(lim.max, t, d) + 40, Math.round(Number($('bar-length').value) || barLenFromHoles(d.holes, t, d)))
+    );
     d.lengthMm = len;
-    const pos = clampDevice(d, spec(d.type));
+    const pos = clampDevice(d, t);
     d.x = pos.x;
     d.y = pos.y;
     syncBarRating(d);
     rerouteConnected(d.id);
+    render();
+    properties();
+    persist();
+  };
+  $('bar-section').onchange = () => {
+    const d = selectedBar();
+    if (!d) return;
+    const t = spec(d.type);
+    if (barStyleOf(t) !== 'brass') return;
+    checkpoint();
+    const cx = d.x + deviceWidth(t, d) / 2;
+    const cy = d.y + deviceHeight(t, d) / 2;
+    d.section = $('bar-section').value === '8x12' ? '8x12' : '6x9';
+    d.lengthMm = barLenFromHoles(barHoles(d, t), t, d);
+    d.x = cx - deviceWidth(t, d) / 2;
+    d.y = cy - deviceHeight(t, d) / 2;
+    const pos = clampDevice(d, t);
+    d.x = pos.x;
+    d.y = pos.y;
+    syncBarRating(d);
+    rerouteConnected(d.id);
+    render();
+    properties();
+    persist();
+  };
+  $('bar-base').onchange = () => {
+    const d = selectedBar();
+    if (!d) return;
+    const t = spec(d.type);
+    if (barStyleOf(t) !== 'brass') return;
+    checkpoint();
+    d.baseStyle = $('bar-base').value === 'wing' ? 'wing' : 'block';
+    const pos = clampDevice(d, t);
+    d.x = pos.x;
+    d.y = pos.y;
+    syncBarRating(d);
     render();
     properties();
     persist();
@@ -2684,10 +2996,11 @@
   $('bar-role').onchange = () => {
     const d = selectedBar();
     if (!d) return;
+    const t = spec(d.type);
     checkpoint();
-    d.role = barRole({ role: $('bar-role').value }, spec(d.type));
-    if (!d.label || /^(บาร์ N|บาร์ PE|บาร์เทอร์มินัล|บาร์เทอร์มินัล N\/PE)$/.test(d.label)) {
-      d.label = d.role === 'PE' ? 'บาร์ PE' : d.role === 'N' ? 'บาร์ N' : 'บาร์เทอร์มินัล';
+    d.role = barRole({ role: $('bar-role').value }, t);
+    if (barStyleOf(t) === 'brass' && (!d.label || /^(บาร์ N|บาร์ PE|บาร์เทอร์มินัล|บาร์ทองเหลือง)/.test(d.label))) {
+      d.label = d.role === 'PE' ? 'บาร์ PE' : d.role === 'N' ? 'บาร์ N' : 'บาร์ทองเหลือง';
     }
     syncBarRating(d);
     render();
