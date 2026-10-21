@@ -185,12 +185,33 @@ window.PANEL_CATALOG = {
     { id: 'meter-a', name: 'A-Meter', nameTh: 'แอมมิเตอร์', cat: 'hmi', modes: ['AC', 'DC'], modules: 4, poles: 2, heightMm: 70, depthMm: 60, icon: 'A', hint: 'กระแส', freePlace: true, widthMm: 72 },
     { id: 'meter-kwh', name: 'kWh', nameTh: 'มิเตอร์พลังงาน', cat: 'hmi', modes: ['AC'], modules: 4, poles: 2, heightMm: 90, depthMm: 65, icon: 'Σ', hint: 'kWh' },
 
-    /* —— เทอร์มินัล / บัสบาร์ —— */
+    /* —— เทอร์มินัล / บัสบาร์ (บนราง DIN) —— */
     { id: 'terminal', name: 'TB', nameTh: 'เทอร์มินัลบล็อก', cat: 'connect', modes: ['AC', 'DC'], modules: 1, poles: 1, heightMm: 50, depthMm: 45, icon: '≡', hint: '1 ช่อง' },
     { id: 'terminal-4', name: 'TB×4', nameTh: 'เทอร์มินัล 4 ช่อง', cat: 'connect', modes: ['AC', 'DC'], modules: 4, poles: 4, heightMm: 50, depthMm: 45, icon: '≡', hint: '4 ช่อง' },
     { id: 'N BAR', name: 'N BAR', nameTh: 'บาร์นิวทรัล', cat: 'connect', modes: ['AC'], modules: 6, poles: 4, heightMm: 40, depthMm: 20, legacy: true, icon: '═', hint: 'N', isBar: true, widthMm: 110 },
     { id: 'PE BAR', name: 'PE BAR', nameTh: 'บาร์สายดิน', cat: 'connect', modes: ['AC', 'DC'], modules: 6, poles: 4, heightMm: 40, depthMm: 20, legacy: true, icon: '═', hint: 'PE', isBar: true, widthMm: 110 },
     { id: 'busbar', name: 'Busbar', nameTh: 'บัสบาร์', cat: 'connect', modes: ['AC', 'DC'], modules: 8, poles: 4, heightMm: 30, depthMm: 20, icon: '▬', hint: 'บัส', isBar: true, widthMm: 160 },
+
+    /* —— บาร์กราวด์-นิวตรอล ติดแผ่น (นอก DIN) —— */
+    {
+      id: 'terminal-bar',
+      name: 'Terminal bar',
+      nameTh: 'บาร์เทอร์มินัล N/PE',
+      cat: 'busbar',
+      modes: ['AC', 'DC'],
+      modules: 0,
+      poles: 8,
+      widthMm: 92,
+      heightMm: 25,
+      depthMm: 20,
+      freePlace: true,
+      isTerminalBar: true,
+      holesDefault: 8,
+      roleDefault: 'N',
+      icon: '═',
+      hint: 'ติดแผ่น · 4–16 จุด · หมุน 90° · ขาน้ำเงิน/เขียว',
+      ratingDefault: '8 ช่อง'
+    },
 
     /* —— อัตโนมัติ / ขับเคลื่อน —— */
     { id: 'plc', name: 'PLC', nameTh: 'PLC', cat: 'automation', modes: ['AC', 'DC'], modules: 8, poles: 4, heightMm: 110, depthMm: 90, icon: '▤', hint: 'คอนโทรลเลอร์', widthMm: 140 },
@@ -211,6 +232,7 @@ window.PANEL_CATALOG = {
     control: 'ควบคุม',
     hmi: 'หน้าตู้ / มิเตอร์',
     connect: 'ต่อสาย / บาร์',
+    busbar: 'Busbar / บาร์กราวด์-นิวตรอล',
     automation: 'อัตโนมัติ / ขับเคลื่อน'
   }
 };

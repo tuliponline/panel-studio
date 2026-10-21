@@ -1,11 +1,11 @@
-/* Panel Studio v7 — octilinear (45°) wires · drag-drop · pan/zoom */
+/* Panel Studio v8 — octilinear wires · plate-mounted terminal busbar */
 (() => {
   const $ = (id) => document.getElementById(id);
   const NS = 'http://www.w3.org/2000/svg';
   const C = window.PANEL_CATALOG;
   const MODULE = C.MODULE_MM;
   const STORAGE = 'panel-studio-v1';
-  const VERSION = 7;
+  const VERSION = 8;
   const LONG_PRESS_MS = 380;
   const MOVE_THRESH = 8;
   const CORNER_HOLD_MS = 400;
@@ -14,6 +14,19 @@
   const TERM_SNAP = 22;
   const ROUTES = ['free', 'vhv', 'hvh', 'straight'];
   const DEG45 = Math.PI / 4;
+  /** Terminal busbar (plate-mounted N/PE bar) — real-ish mm */
+  const TBAR = {
+    pitch: 8.5,
+    sectionW: 6,
+    sectionH: 9,
+    footW: 14,
+    footLen: 20,
+    height: 25,
+    endInset: 5,
+    minHoles: 4,
+    maxHoles: 16,
+    presets: [4, 6, 8, 10, 12, 14, 16]
+  };
 
   const WIRE_COLORS = {
     AC: [
@@ -78,8 +91,44 @@
   /* —— Catalog helpers —— */
   const devicesFor = (m) => C.devices.filter((d) => d.modes.includes(m));
   const spec = (type) => C.devices.find((d) => d.id === type);
-  const deviceWidth = (t) => t.widthMm || t.modules * MODULE;
-  const deviceHeight = (t) => t.heightMm || C.DEVICE_BODY_H;
+  const isTerminalBar = (t) => !!(t && t.isTerminalBar);
+  function barRole(d, t) {
+    const r = (d && d.role) || (t && t.roleDefault) || 'N';
+    return r === 'PE' || r === 'generic' ? r : 'N';
+  }
+  function barOrient(d) {
+    return d && d.orient === 'v' ? 'v' : 'h';
+  }
+  function barHoles(d, t) {
+    const n = Number(d && d.holes != null ? d.holes : t && t.holesDefault);
+    if (!Number.isFinite(n)) return 8;
+    return Math.max(TBAR.minHoles, Math.min(TBAR.maxHoles, Math.round(n)));
+  }
+  function barLenFromHoles(n) {
+    const holes = Math.max(TBAR.minHoles, Math.min(TBAR.maxHoles, n | 0));
+    const metal = (holes - 1) * TBAR.pitch + 2 * TBAR.endInset;
+    return Math.round(2 * TBAR.footLen + metal - 10);
+  }
+  function holesFromBarLen(len) {
+    const L = Math.max(40, Number(len) || 40);
+    const metal = Math.max(TBAR.pitch, L - (2 * TBAR.footLen - 10));
+    const n = Math.round((metal - 2 * TBAR.endInset) / TBAR.pitch) + 1;
+    return Math.max(TBAR.minHoles, Math.min(TBAR.maxHoles, n));
+  }
+  function terminalBarGeom(d, t) {
+    t = t || (d && spec(d.type));
+    const holes = barHoles(d, t);
+    let lengthMm = Number(d && d.lengthMm);
+    if (!Number.isFinite(lengthMm) || lengthMm < 40) lengthMm = barLenFromHoles(holes);
+    lengthMm = Math.max(barLenFromHoles(TBAR.minHoles), Math.min(240, Math.round(lengthMm)));
+    const orient = barOrient(d);
+    const role = barRole(d, t);
+    const w = orient === 'v' ? TBAR.height : lengthMm;
+    const h = orient === 'v' ? lengthMm : TBAR.height;
+    return { holes, lengthMm, orient, role, w, h, pitch: TBAR.pitch };
+  }
+  const deviceWidth = (t, d) => (isTerminalBar(t) ? terminalBarGeom(d, t).w : t.widthMm || t.modules * MODULE);
+  const deviceHeight = (t, d) => (isTerminalBar(t) ? terminalBarGeom(d, t).h : t.heightMm || C.DEVICE_BODY_H);
   const state = () => data[mode];
   const cabinet = () => state().cabinet;
 
@@ -178,8 +227,8 @@
   }
   function clampDevice(d, t) {
     const p = plate();
-    const w = deviceWidth(t);
-    const h = deviceHeight(t);
+    const w = deviceWidth(t, d);
+    const h = deviceHeight(t, d);
     let xMin = p.x + 4;
     let xMax = p.x + p.w - w - 4;
     if (!t.freePlace) {
@@ -191,9 +240,12 @@
     }
     let x = Math.max(xMin, Math.min(xMax, d.x));
     if (!t.freePlace) x = snapModuleX(x, w);
+    else if (isTerminalBar(t)) x = Math.round(x / GRID) * GRID;
     let y = t.freePlace ? d.y : snapToRailY(d.y, t);
+    if (t.freePlace && isTerminalBar(t)) y = Math.round(y / GRID) * GRID;
     y = Math.max(p.y + 2, Math.min(p.y + p.h - h - 2, y));
-    return { x: Math.round(x), y: Math.round(y) };
+    x = Math.max(xMin, Math.min(xMax, x));
+    return { x: Math.round(x * 2) / 2, y: Math.round(y * 2) / 2 };
   }
   function fitsOnRail(t, railIdx, exceptId) {
     if (t.freePlace) return true;
@@ -227,7 +279,7 @@
     if (e.free || (e.id == null && Number.isFinite(e.x) && Number.isFinite(e.y))) {
       return { free: true, x: Math.round(e.x), y: Math.round(e.y) };
     }
-    if (typeof e.id === 'string' && Number.isInteger(e.i) && e.i >= 0 && e.i < 16 && devices.some((x) => x.id === e.id)) {
+    if (typeof e.id === 'string' && Number.isInteger(e.i) && e.i >= 0 && e.i < TBAR.maxHoles && devices.some((x) => x.id === e.id)) {
       return { id: e.id, i: e.i };
     }
     return null;
@@ -298,12 +350,30 @@
       const devices = [];
       for (const d of block.devices) {
         if (!validDevice(d, m)) return null;
-        devices.push({ id: d.id, type: d.type, label: String(d.label).slice(0, 40), rating: String(d.rating).slice(0, 40), x: d.x, y: d.y });
+        const t = spec(d.type);
+        const nd = { id: d.id, type: d.type, label: String(d.label).slice(0, 40), rating: String(d.rating).slice(0, 40), x: d.x, y: d.y };
+        if (isTerminalBar(t)) {
+          nd.holes = barHoles(d, t);
+          nd.lengthMm = Number.isFinite(Number(d.lengthMm)) ? Math.round(Number(d.lengthMm)) : barLenFromHoles(nd.holes);
+          nd.orient = d.orient === 'v' ? 'v' : 'h';
+          nd.role = barRole(d, t);
+        }
+        devices.push(nd);
       }
+      // Drop wire ends that point past a bar's hole count
+      const maxPort = (id) => {
+        const d = devices.find((x) => x.id === id);
+        if (!d) return 0;
+        const t = spec(d.type);
+        if (isTerminalBar(t)) return barHoles(d, t);
+        return Math.max(1, (t && t.poles) || 1) * 2;
+      };
       const wires = [];
       for (const w of block.wires) {
         const nw = normalizeWire(w, devices);
         if (!nw) return null;
+        if (!nw.a.free && nw.a.i >= maxPort(nw.a.id)) continue;
+        if (!nw.b.free && nw.b.i >= maxPort(nw.b.id)) continue;
         wires.push(nw);
       }
       // Collapse legacy freehand squiggles → corner polylines
@@ -312,14 +382,8 @@
         if (end.free) return { x: end.x, y: end.y };
         const d = devices.find((x) => x.id === end.id);
         if (!d) return null;
-        const t = spec(d.type);
-        if (!t) return null;
-        const n = Math.max(1, t.poles | 0);
-        const w = deviceWidth(t);
-        const h = deviceHeight(t);
-        const col = end.i % n;
-        const top = end.i < n;
-        return { x: d.x + ((col + 1) * w) / (n + 1), y: d.y + (top ? 0 : h) };
+        const pt = ports(d)[end.i];
+        return pt ? { x: pt.x, y: pt.y } : null;
       };
       wires.forEach((w) => {
         const a = portOf(w.a);
@@ -454,9 +518,22 @@
   function ports(d) {
     const t = spec(d.type);
     if (!t) return [];
+    if (isTerminalBar(t)) {
+      const g = terminalBarGeom(d, t);
+      const base = g.role === 'PE' ? 'PE' : g.role === 'N' ? 'N' : 'B';
+      const margin = 12;
+      const usable = Math.max(TBAR.pitch, g.lengthMm - 2 * margin);
+      return Array.from({ length: g.holes }, (_, i) => {
+        const along = margin + (g.holes === 1 ? usable / 2 : (i * usable) / (g.holes - 1));
+        if (g.orient === 'h') {
+          return { x: d.x + along, y: d.y + 7, label: `${base}${i + 1}`, top: true };
+        }
+        return { x: d.x + 7, y: d.y + along, label: `${base}${i + 1}`, top: true };
+      });
+    }
     const n = Math.max(1, t.poles | 0);
-    const w = deviceWidth(t);
-    const h = deviceHeight(t);
+    const w = deviceWidth(t, d);
+    const h = deviceHeight(t, d);
     const isBar = !!t.isBar;
     return Array.from({ length: n * 2 }, (_, i) => {
       const col = i % n;
@@ -473,6 +550,59 @@
       } else label = n === 1 ? '+' : col % 2 === 0 ? '+' : '−';
       return { x, y, label, top };
     });
+  }
+  function wiresOnBarPorts(devId, fromIndex) {
+    return state().wires.filter((w) => {
+      const aHit = w.a && !w.a.free && w.a.id === devId && w.a.i >= fromIndex;
+      const bHit = w.b && !w.b.free && w.b.id === devId && w.b.i >= fromIndex;
+      return aHit || bHit;
+    });
+  }
+  function applyBarHoles(d, n, opts) {
+    const t = spec(d.type);
+    if (!isTerminalBar(t)) return false;
+    n = Math.max(TBAR.minHoles, Math.min(TBAR.maxHoles, Math.round(n)));
+    const doomed = wiresOnBarPorts(d.id, n);
+    if (doomed.length) {
+      const ok =
+        opts && opts.force
+          ? true
+          : window.confirm(`มีสาย ${doomed.length} เส้นที่จุดเชื่อมต่อ ${n + 1} ขึ้นไป — ลบสายเหล่านั้นแล้วลดจำนวนช่องหรือไม่?`);
+      if (!ok) return false;
+      const drop = new Set(doomed.map((w) => w.id));
+      state().wires = state().wires.filter((w) => !drop.has(w.id));
+      if (selectedWire && drop.has(selectedWire)) selectedWire = null;
+      $('status').textContent = `ลบสาย ${doomed.length} เส้นที่ช่องถูกตัดออก`;
+    }
+    d.holes = n;
+    if (!(opts && opts.keepLength)) d.lengthMm = barLenFromHoles(n);
+    const pos = clampDevice(d, t);
+    d.x = pos.x;
+    d.y = pos.y;
+    return true;
+  }
+  function rotateTerminalBar(d) {
+    const t = spec(d.type);
+    if (!isTerminalBar(t)) return;
+    const w0 = deviceWidth(t, d);
+    const h0 = deviceHeight(t, d);
+    const cx = d.x + w0 / 2;
+    const cy = d.y + h0 / 2;
+    d.orient = barOrient(d) === 'v' ? 'h' : 'v';
+    const w1 = deviceWidth(t, d);
+    const h1 = deviceHeight(t, d);
+    d.x = cx - w1 / 2;
+    d.y = cy - h1 / 2;
+    const pos = clampDevice(d, t);
+    d.x = pos.x;
+    d.y = pos.y;
+  }
+  function syncBarRating(d) {
+    const t = spec(d.type);
+    if (!isTerminalBar(t)) return;
+    const g = terminalBarGeom(d, t);
+    const role = g.role === 'PE' ? 'PE' : g.role === 'N' ? 'N' : 'บาร์';
+    d.rating = `${role} · ${g.holes} ช่อง`;
   }
   function isFreeEnd(e) {
     return !!(e && (e.free || (e.id == null && Number.isFinite(e.x) && Number.isFinite(e.y))));
@@ -744,6 +874,7 @@
     return window.matchMedia('(max-width:900px)').matches ? TERM_SNAP + 8 : TERM_SNAP;
   }
   function terminalRadius(t) {
+    if (isTerminalBar(t)) return window.matchMedia('(max-width:900px)').matches ? 10 : 7;
     const base = Math.max(7, Math.min(11, Math.max(deviceWidth(t), deviceHeight(t)) / 10));
     return window.matchMedia('(max-width:900px)').matches ? Math.max(base, 12) : base;
   }
@@ -766,11 +897,12 @@
     const ys = railYs();
     const byRail = ys.map(() => 0);
     const layout = autoRailYs();
-    for (const d of state().devices) {
+    const list = state().devices;
+    for (const d of list) {
       const t = spec(d.type);
       if (!t) continue;
-      const w = deviceWidth(t);
-      const h = deviceHeight(t);
+      const w = deviceWidth(t, d);
+      const h = deviceHeight(t, d);
       if (d.x < p.x - 1 || d.y < p.y - 1 || d.x + w > p.x + p.w + 2 || d.y + h > p.y + p.h + 2) msgs.push(`«${d.label}» อยู่นอกแผ่นติดตั้ง`);
       if (t.depthMm && t.depthMm > c.depth) msgs.push(`«${d.label}» ลึก ${t.depthMm} มม. แต่ตู้ลึก ${c.depth} มม.`);
       if (t.freePlace) continue;
@@ -778,6 +910,21 @@
       else if (d.x < rx - 1 || d.x + w > rx + usable + 1) msgs.push(`«${d.label}» ยื่นนอกราง DIN`);
       const idx = nearestRailIndex(d.y, t);
       byRail[idx] += t.modules;
+    }
+    for (let i = 0; i < list.length; i++) {
+      for (let j = i + 1; j < list.length; j++) {
+        const a = list[i];
+        const b = list[j];
+        const ta = spec(a.type);
+        const tb = spec(b.type);
+        if (!ta || !tb) continue;
+        const aw = deviceWidth(ta, a);
+        const ah = deviceHeight(ta, a);
+        const bw = deviceWidth(tb, b);
+        const bh = deviceHeight(tb, b);
+        const overlap = !(a.x + aw <= b.x + 0.5 || b.x + bw <= a.x + 0.5 || a.y + ah <= b.y + 0.5 || b.y + bh <= a.y + 0.5);
+        if (overlap) msgs.push(`«${a.label}» ทับกับ «${b.label}»`);
+      }
     }
     byRail.forEach((mods, i) => {
       if (mods > maxMods) msgs.push(`ราง DIN ${String(i + 1).padStart(2, '0')} ใช้ ${mods}/${maxMods} โมดูล (ราง ${Math.round(usable)} มม.)`);
@@ -799,7 +946,7 @@
     chip.classList.toggle('show', has && !(drag && (drag.kind === 'device' || drag.kind === 'catalog')));
     if (d) {
       const t = spec(d.type);
-      $('float-label').textContent = d.label + (t ? ` · ${deviceWidth(t)}×${deviceHeight(t)} มม.` : '');
+      $('float-label').textContent = d.label + (t ? ` · ${deviceWidth(t, d)}×${deviceHeight(t, d)} มม.` : '');
     } else if (w) {
       const r = normalizeRoute(w.route);
       const label = { free: 'อิสระ', vhv: 'V–H', hvh: 'H–V', straight: 'ตรง' }[r] || r;
@@ -812,13 +959,46 @@
     $('props').hidden = !d;
     $('wire-props').hidden = !w;
     $('empty').hidden = !!(d || w);
+    const barBox = $('bar-props');
+    if (barBox) barBox.hidden = true;
     if (d) {
       const t = spec(d.type);
       $('label').value = d.label;
       $('rating').value = d.rating;
-      $('dev-size').textContent = t
-        ? `${deviceWidth(t)} × ${deviceHeight(t)} × ${t.depthMm || '—'} มม. · ${t.modules} โมดูล${t.brand ? ' · ' + t.brand + (t.model ? ' ' + t.model : '') : ''}`
-        : '—';
+      if (isTerminalBar(t)) {
+        const g = terminalBarGeom(d, t);
+        $('dev-size').textContent = `${g.w} × ${g.h} × ${t.depthMm || 20} มม. · บาร์ ${TBAR.sectionW}×${TBAR.sectionH} มม. · ระยะรู ~${TBAR.pitch} มม. · ติดแผ่น (นอก DIN)`;
+        if (barBox) {
+          barBox.hidden = false;
+          $('bar-holes').value = String(g.holes);
+          $('bar-length').value = String(g.lengthMm);
+          $('bar-role').value = g.role;
+          $('bar-orient-h').classList.toggle('active', g.orient === 'h');
+          $('bar-orient-v').classList.toggle('active', g.orient === 'v');
+          const presets = $('bar-presets');
+          presets.replaceChildren();
+          TBAR.presets.forEach((n) => {
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.textContent = `${n}`;
+            b.title = `${n} จุด`;
+            b.classList.toggle('active', n === g.holes);
+            b.onclick = () => {
+              checkpoint();
+              if (!applyBarHoles(d, n)) return;
+              syncBarRating(d);
+              render();
+              properties();
+              persist();
+            };
+            presets.append(b);
+          });
+        }
+      } else {
+        $('dev-size').textContent = t
+          ? `${deviceWidth(t, d)} × ${deviceHeight(t, d)} × ${t.depthMm || '—'} มม. · ${t.modules} โมดูล${t.brand ? ' · ' + t.brand + (t.model ? ' ' + t.model : '') : ''}`
+          : '—';
+      }
     }
     if (w) {
       fillColorSelect($('wprop-color'), w.color);
@@ -935,27 +1115,132 @@
     state().devices.forEach((d) => {
       const t = spec(d.type);
       if (!t) return;
-      const w = deviceWidth(t);
-      const h = deviceHeight(t);
-      const g = el('g', { class: 'device' + (t.freePlace ? ' free' : ''), 'data-id': d.id });
+      const w = deviceWidth(t, d);
+      const h = deviceHeight(t, d);
+      const g = el('g', { class: 'device' + (t.freePlace ? ' free' : '') + (isTerminalBar(t) ? ' tbar' : ''), 'data-id': d.id });
       const isSel = selected === d.id;
       const pad = Math.max(2, Math.min(6, 24 - Math.min(w, h) / 2));
       const hit = el('rect', { x: d.x - pad, y: d.y - pad, width: w + pad * 2, height: h + pad * 2, fill: 'transparent', class: 'device-hit' });
-      const labelFs = Math.max(7, Math.min(10, w / 5.5));
-      const ratingFs = Math.max(6, Math.min(8, w / 6.5));
-      const labelY = d.y + Math.min(12, h * 0.32);
-      const ratingY = d.y + h - Math.max(5, Math.min(8, h * 0.12));
-      // keep label/rating clear of terminal zones (top/bottom edges)
-      g.append(
-        hit,
-        el('rect', { x: d.x, y: d.y, width: w, height: h, rx: 3, fill: '#fff', stroke: isSel ? '#0a6b5c' : '#8a9ba4', 'stroke-width': isSel ? 2.5 : 1.2 }),
-        el('rect', { x: d.x + 3, y: d.y + h * 0.38, width: Math.max(2, w - 6), height: Math.max(8, h * 0.2), rx: 2, fill: t.isBar ? '#b89a4e' : '#243842' }),
-        el('text', { x: d.x + w / 2, y: labelY, 'text-anchor': 'middle', 'font-size': labelFs, fill: '#1a3038' }, (d.label || '').slice(0, w < 28 ? 4 : 10)),
-        el('text', { x: d.x + w / 2, y: ratingY, 'text-anchor': 'middle', 'font-size': ratingFs, fill: '#6d7f88' }, (d.rating || '').slice(0, w < 28 ? 4 : 12))
-      );
-      g.querySelectorAll('rect:not(.device-hit), text').forEach((n) => {
-        n.style.pointerEvents = 'none';
-      });
+
+      if (isTerminalBar(t)) {
+        const geom = terminalBarGeom(d, t);
+        const footColor = geom.role === 'PE' ? '#2f9e44' : geom.role === 'N' ? '#1c7ed6' : '#868e96';
+        const brass = '#c9a227';
+        const brassDark = '#a8841a';
+        const L = geom.lengthMm;
+        const foot = TBAR.footW;
+        const barH = TBAR.sectionH;
+        const barT = TBAR.sectionW;
+        if (geom.orient === 'h') {
+          const barY = d.y + 4;
+          const barX = d.x + foot - 4;
+          const barW = Math.max(barT, L - 2 * foot + 8);
+          g.append(
+            hit,
+            el('rect', { x: d.x, y: d.y + h - 12, width: foot, height: 12, rx: 1.5, fill: footColor, stroke: '#14532d22', 'stroke-width': 0.5 }),
+            el('rect', { x: d.x + L - foot, y: d.y + h - 12, width: foot, height: 12, rx: 1.5, fill: footColor, stroke: '#14532d22', 'stroke-width': 0.5 }),
+            el('circle', { cx: d.x + foot / 2, cy: d.y + h - 6, r: 2.2, fill: '#e9ecef', stroke: '#495057', 'stroke-width': 0.6 }),
+            el('circle', { cx: d.x + L - foot / 2, cy: d.y + h - 6, r: 2.2, fill: '#e9ecef', stroke: '#495057', 'stroke-width': 0.6 }),
+            el('rect', { x: barX, y: barY, width: barW, height: barH, rx: 1, fill: brass, stroke: isSel ? '#0a6b5c' : brassDark, 'stroke-width': isSel ? 1.8 : 0.8 })
+          );
+          ports(d).forEach((pt) => {
+            g.append(
+              el('circle', { cx: pt.x, cy: barY + barH / 2, r: 2.4, fill: '#ced4da', stroke: '#495057', 'stroke-width': 0.5 }),
+              el('line', { x1: pt.x - 1.6, x2: pt.x + 1.6, y1: barY + 2, y2: barY + 2, stroke: '#343a40', 'stroke-width': 0.7 }),
+              el('line', { x1: pt.x, x2: pt.x, y1: barY + 1.2, y2: barY + 3.2, stroke: '#343a40', 'stroke-width': 0.7 })
+            );
+          });
+          g.append(
+            el('text', { x: d.x + L / 2, y: d.y + h - 1, 'text-anchor': 'middle', 'font-size': 7, fill: '#1a3038' }, (d.label || '').slice(0, 14))
+          );
+        } else {
+          const barX = d.x + 4;
+          const barY = d.y + foot - 4;
+          const barLen = Math.max(barT, L - 2 * foot + 8);
+          g.append(
+            hit,
+            el('rect', { x: d.x + w - 12, y: d.y, width: 12, height: foot, rx: 1.5, fill: footColor }),
+            el('rect', { x: d.x + w - 12, y: d.y + L - foot, width: 12, height: foot, rx: 1.5, fill: footColor }),
+            el('circle', { cx: d.x + w - 6, cy: d.y + foot / 2, r: 2.2, fill: '#e9ecef', stroke: '#495057', 'stroke-width': 0.6 }),
+            el('circle', { cx: d.x + w - 6, cy: d.y + L - foot / 2, r: 2.2, fill: '#e9ecef', stroke: '#495057', 'stroke-width': 0.6 }),
+            el('rect', { x: barX, y: barY, width: barH, height: barLen, rx: 1, fill: brass, stroke: isSel ? '#0a6b5c' : brassDark, 'stroke-width': isSel ? 1.8 : 0.8 })
+          );
+          ports(d).forEach((pt) => {
+            g.append(
+              el('circle', { cx: barX + barH / 2, cy: pt.y, r: 2.4, fill: '#ced4da', stroke: '#495057', 'stroke-width': 0.5 }),
+              el('line', { x1: barX + 2, x2: barX + 2, y1: pt.y - 1.6, y2: pt.y + 1.6, stroke: '#343a40', 'stroke-width': 0.7 }),
+              el('line', { x1: barX + 1.2, x2: barX + 3.2, y1: pt.y, y2: pt.y, stroke: '#343a40', 'stroke-width': 0.7 })
+            );
+          });
+          g.append(
+            el('text', {
+              x: d.x + w - 1,
+              y: d.y + L / 2,
+              'text-anchor': 'middle',
+              'font-size': 7,
+              fill: '#1a3038',
+              transform: `rotate(-90 ${d.x + w - 1} ${d.y + L / 2})`
+            }, (d.label || '').slice(0, 14))
+          );
+        }
+        g.querySelectorAll('rect:not(.device-hit), circle, line, text').forEach((n) => {
+          n.style.pointerEvents = 'none';
+        });
+        if (isSel) {
+          const hx = geom.orient === 'h' ? d.x + w - 3 : d.x + w / 2 - 4;
+          const hy = geom.orient === 'h' ? d.y + h / 2 - 4 : d.y + h - 3;
+          const hw = geom.orient === 'h' ? 6 : 8;
+          const hh = geom.orient === 'h' ? 8 : 6;
+          const handle = el('rect', {
+            x: hx,
+            y: hy,
+            width: hw,
+            height: hh,
+            rx: 1.5,
+            fill: '#0a6b5c',
+            stroke: '#fff',
+            'stroke-width': 1,
+            class: 'bar-resize',
+            style: `cursor:${geom.orient === 'h' ? 'ew-resize' : 'ns-resize'}`
+          });
+          handle.addEventListener('pointerdown', (e) => {
+            e.stopPropagation();
+            selectedWire = null;
+            selected = d.id;
+            checkpoint();
+            drag = {
+              kind: 'bar-resize',
+              id: d.id,
+              startLen: geom.lengthMm,
+              startHoles: geom.holes,
+              startX: point(e).x,
+              startY: point(e).y,
+              orient: geom.orient
+            };
+            try {
+              b.setPointerCapture(e.pointerId);
+            } catch (_) {}
+            properties();
+            render();
+          });
+          g.append(handle);
+        }
+      } else {
+        const labelFs = Math.max(7, Math.min(10, w / 5.5));
+        const ratingFs = Math.max(6, Math.min(8, w / 6.5));
+        const labelY = d.y + Math.min(12, h * 0.32);
+        const ratingY = d.y + h - Math.max(5, Math.min(8, h * 0.12));
+        g.append(
+          hit,
+          el('rect', { x: d.x, y: d.y, width: w, height: h, rx: 3, fill: '#fff', stroke: isSel ? '#0a6b5c' : '#8a9ba4', 'stroke-width': isSel ? 2.5 : 1.2 }),
+          el('rect', { x: d.x + 3, y: d.y + h * 0.38, width: Math.max(2, w - 6), height: Math.max(8, h * 0.2), rx: 2, fill: t.isBar ? '#b89a4e' : '#243842' }),
+          el('text', { x: d.x + w / 2, y: labelY, 'text-anchor': 'middle', 'font-size': labelFs, fill: '#1a3038' }, (d.label || '').slice(0, w < 28 ? 4 : 10)),
+          el('text', { x: d.x + w / 2, y: ratingY, 'text-anchor': 'middle', 'font-size': ratingFs, fill: '#6d7f88' }, (d.rating || '').slice(0, w < 28 ? 4 : 12))
+        );
+        g.querySelectorAll('rect:not(.device-hit), text').forEach((n) => {
+          n.style.pointerEvents = 'none';
+        });
+      }
 
       hit.addEventListener('pointerdown', (e) => {
         e.stopPropagation();
@@ -1206,7 +1491,16 @@
       counts[d.type] = (counts[d.type] || 0) + 1;
     });
     $('bom').textContent = Object.entries(counts)
-      .map(([k, v]) => `${(spec(k) || {}).name || k} × ${v}`)
+      .map(([k, v]) => {
+        const t = spec(k) || {};
+        const name = t.nameTh || t.name || k;
+        if (isTerminalBar(t)) {
+          const sample = state().devices.find((d) => d.type === k);
+          const holes = sample ? barHoles(sample, t) : t.holesDefault || 8;
+          return `${name} (${holes} จุด) × ${v}`;
+        }
+        return `${name} × ${v}`;
+      })
       .join(' · ');
     const warn = $('warnings');
     if (msgs.length) {
@@ -1384,26 +1678,38 @@
     const t = spec(type);
     if (!t || !t.modes.includes(mode)) return null;
     if (!skipCheckpoint) checkpoint();
-    const pos = clampDevice({ x, y }, t);
-    const railIdx = nearestRailIndex(pos.y, t);
-    if (!t.freePlace && !fitsOnRail(t, railIdx)) {
-      // still place but warn
-    }
     const d = {
       id: crypto.randomUUID(),
       type,
       label: t.nameTh || t.name,
       rating: t.ratingDefault || 'ระบุพิกัด',
-      x: pos.x,
-      y: pos.y
+      x,
+      y
     };
+    if (isTerminalBar(t)) {
+      d.holes = t.holesDefault || 8;
+      d.lengthMm = barLenFromHoles(d.holes);
+      d.orient = 'h';
+      d.role = t.roleDefault || 'N';
+      d.label = d.role === 'PE' ? 'บาร์ PE' : d.role === 'N' ? 'บาร์ N' : 'บาร์เทอร์มินัล';
+      syncBarRating(d);
+    }
+    const pos = clampDevice(d, t);
+    d.x = pos.x;
+    d.y = pos.y;
+    const railIdx = nearestRailIndex(pos.y, t);
+    if (!t.freePlace && !fitsOnRail(t, railIdx)) {
+      // still place but warn
+    }
     state().devices.push(d);
     selected = d.id;
     selectedWire = null;
     render();
     properties();
     persist();
-    $('status').textContent = `วาง ${t.nameTh || t.name} แล้ว`;
+    $('status').textContent = isTerminalBar(t)
+      ? `วาง ${d.label} (${d.holes} จุด) บนแผ่นติดตั้งแล้ว`
+      : `วาง ${t.nameTh || t.name} แล้ว`;
     return d;
   }
 
@@ -1450,17 +1756,35 @@
       let x = pt.x - drag.dx;
       let y = pt.y - drag.dy;
       const railIdx = nearestRailIndex(y, t);
-      const preview = clampDevice({ x, y }, t);
-      drag.ghost = { x: preview.x, y: preview.y, w: deviceWidth(t), h: deviceHeight(t) };
+      const preview = clampDevice({ ...d, x, y }, t);
+      const dw = deviceWidth(t, d);
+      const dh = deviceHeight(t, d);
+      drag.ghost = { x: preview.x, y: preview.y, w: dw, h: dh };
       drag.railIdx = railIdx;
       drag.fit = t.freePlace || (fitsOnRail(t, railIdx, d.id) && deviceWidth(t) <= railUsableWidth());
       // live position (revert on drop if !fit)
       d.x = preview.x;
-      d.y = t.freePlace ? Math.max(plate().y + 2, Math.min(plate().y + plate().h - deviceHeight(t) - 2, y)) : preview.y;
+      d.y = t.freePlace ? Math.max(plate().y + 2, Math.min(plate().y + plate().h - dh - 2, preview.y)) : preview.y;
       rerouteConnected(d.id);
       const trash = overTrash(e.clientX, e.clientY);
       $('trash-zone').classList.toggle('hot', trash);
       drag.toTrash = trash;
+      render();
+    } else if (drag.kind === 'bar-resize') {
+      const d = state().devices.find((x) => x.id === drag.id);
+      const t = d && spec(d.type);
+      if (!d || !isTerminalBar(t)) return;
+      const delta = drag.orient === 'h' ? pt.x - drag.startX : pt.y - drag.startY;
+      const nextLen = Math.max(barLenFromHoles(TBAR.minHoles), Math.min(240, drag.startLen + delta));
+      const nextHoles = holesFromBarLen(nextLen);
+      d.lengthMm = barLenFromHoles(nextHoles);
+      d.holes = nextHoles;
+      const pos = clampDevice(d, t);
+      d.x = pos.x;
+      d.y = pos.y;
+      syncBarRating(d);
+      rerouteConnected(d.id);
+      $('status').textContent = `บาร์ ${d.holes} จุด · ยาว ${d.lengthMm} มม.`;
       render();
     } else if (drag.kind === 'catalog') {
       const t = spec(drag.type);
@@ -1607,6 +1931,39 @@
       }
       showTrash(false);
       clearDomGhost();
+      drag = null;
+      render();
+      properties();
+      persist();
+    } else if (kind === 'bar-resize') {
+      const d = state().devices.find((x) => x.id === drag.id);
+      if (d) {
+        const t = spec(d.type);
+        const doomed = wiresOnBarPorts(d.id, d.holes);
+        if (doomed.length) {
+          // shrinking removed connected holes — confirm or restore
+          const ok = window.confirm(`มีสาย ${doomed.length} เส้นที่จุดถูกตัดออก — ลบสายเหล่านั้นหรือไม่?`);
+          if (!ok) {
+            d.holes = drag.startHoles;
+            d.lengthMm = drag.startLen;
+            const pos = clampDevice(d, t);
+            d.x = pos.x;
+            d.y = pos.y;
+            syncBarRating(d);
+            $('status').textContent = 'ยกเลิกการลดช่องที่มีสาย';
+          } else {
+            const drop = new Set(doomed.map((w) => w.id));
+            state().wires = state().wires.filter((w) => !drop.has(w.id));
+            if (selectedWire && drop.has(selectedWire)) selectedWire = null;
+            syncBarRating(d);
+            $('status').textContent = `บาร์ ${d.holes} จุด · ลบสาย ${doomed.length} เส้น`;
+          }
+        } else {
+          syncBarRating(d);
+          $('status').textContent = `บาร์ ${d.holes} จุด · ยาว ${d.lengthMm} มม.`;
+        }
+        rerouteConnected(d.id);
+      }
       drag = null;
       render();
       properties();
@@ -1851,25 +2208,29 @@
 
   function findOpenSlot(t) {
     const p = plate();
-    const w = deviceWidth(t);
-    const h = deviceHeight(t);
-    const ys = t.freePlace ? [p.y + 20, p.y + p.h / 2] : railYs().map((ry) => ry - railOffset(t));
+    const stub = isTerminalBar(t)
+      ? { type: t.id, holes: t.holesDefault || 8, lengthMm: barLenFromHoles(t.holesDefault || 8), orient: 'h', role: t.roleDefault || 'N', x: 0, y: 0 }
+      : { x: 0, y: 0 };
+    const w = deviceWidth(t, stub);
+    const h = deviceHeight(t, stub);
+    const step = t.freePlace ? Math.max(GRID * 4, 10) : MODULE;
+    const ys = t.freePlace ? [p.y + 20, p.y + p.h / 2, p.y + p.h - h - 20] : railYs().map((ry) => ry - railOffset(t));
     const x0 = t.freePlace ? p.x + 8 : railDrawX();
     const xLim = t.freePlace ? p.x + p.w - 4 : railDrawX() + railUsableWidth();
     for (const y0 of ys) {
-      for (let x = x0; x + w <= xLim; x += MODULE) {
-        const pos = clampDevice({ x, y: y0 }, t);
+      for (let x = x0; x + w <= xLim; x += step) {
+        const pos = clampDevice({ ...stub, x, y: y0 }, t);
         const overlap = state().devices.some((d) => {
           const dt = spec(d.type);
           if (!dt) return false;
-          const dw = deviceWidth(dt);
-          const dh = deviceHeight(dt);
+          const dw = deviceWidth(dt, d);
+          const dh = deviceHeight(dt, d);
           return !(pos.x + w + 4 <= d.x || d.x + dw + 4 <= pos.x || pos.y + h + 4 <= d.y || d.y + dh + 4 <= pos.y);
         });
         if (!overlap) return pos;
       }
     }
-    return clampDevice({ x: x0, y: ys[0] }, t);
+    return clampDevice({ ...stub, x: x0, y: ys[0] }, t);
   }
 
   /* —— Catalog / forms —— */
@@ -2238,6 +2599,101 @@
       persist();
     };
   });
+  function selectedBar() {
+    const d = state().devices.find((x) => x.id === selected);
+    return d && isTerminalBar(spec(d.type)) ? d : null;
+  }
+  $('bar-holes-minus').onclick = () => {
+    const d = selectedBar();
+    if (!d) return;
+    checkpoint();
+    if (!applyBarHoles(d, barHoles(d, spec(d.type)) - 1)) return;
+    syncBarRating(d);
+    render();
+    properties();
+    persist();
+  };
+  $('bar-holes-plus').onclick = () => {
+    const d = selectedBar();
+    if (!d) return;
+    checkpoint();
+    if (!applyBarHoles(d, barHoles(d, spec(d.type)) + 1)) return;
+    syncBarRating(d);
+    render();
+    properties();
+    persist();
+  };
+  $('bar-holes').onchange = () => {
+    const d = selectedBar();
+    if (!d) return;
+    checkpoint();
+    if (!applyBarHoles(d, parseInt($('bar-holes').value, 10))) {
+      properties();
+      return;
+    }
+    syncBarRating(d);
+    render();
+    properties();
+    persist();
+  };
+  $('bar-length').onchange = () => {
+    const d = selectedBar();
+    if (!d) return;
+    checkpoint();
+    const len = Math.max(40, Math.min(240, Math.round(Number($('bar-length').value) || barLenFromHoles(d.holes))));
+    d.lengthMm = len;
+    const pos = clampDevice(d, spec(d.type));
+    d.x = pos.x;
+    d.y = pos.y;
+    syncBarRating(d);
+    rerouteConnected(d.id);
+    render();
+    properties();
+    persist();
+  };
+  $('bar-orient-h').onclick = () => {
+    const d = selectedBar();
+    if (!d || barOrient(d) === 'h') return;
+    checkpoint();
+    rotateTerminalBar(d);
+    rerouteConnected(d.id);
+    render();
+    properties();
+    persist();
+  };
+  $('bar-orient-v').onclick = () => {
+    const d = selectedBar();
+    if (!d || barOrient(d) === 'v') return;
+    checkpoint();
+    rotateTerminalBar(d);
+    rerouteConnected(d.id);
+    render();
+    properties();
+    persist();
+  };
+  $('bar-rotate').onclick = () => {
+    const d = selectedBar();
+    if (!d) return;
+    checkpoint();
+    rotateTerminalBar(d);
+    rerouteConnected(d.id);
+    render();
+    properties();
+    persist();
+  };
+  $('bar-role').onchange = () => {
+    const d = selectedBar();
+    if (!d) return;
+    checkpoint();
+    d.role = barRole({ role: $('bar-role').value }, spec(d.type));
+    if (!d.label || /^(บาร์ N|บาร์ PE|บาร์เทอร์มินัล|บาร์เทอร์มินัล N\/PE)$/.test(d.label)) {
+      d.label = d.role === 'PE' ? 'บาร์ PE' : d.role === 'N' ? 'บาร์ N' : 'บาร์เทอร์มินัล';
+    }
+    syncBarRating(d);
+    render();
+    properties();
+    persist();
+  };
   $('wprop-color').onchange = () => {
     const w = state().wires.find((x) => x.id === selectedWire);
     if (!w) return;

@@ -107,6 +107,14 @@ h1{font-size:18px;margin:0;font-weight:700}
 }
 .part strong{display:block;font-size:13px;font-weight:600}
 .part small{display:block;color:var(--muted);font-size:11px;margin-top:2px}
+.stepper{display:flex;gap:6px;align-items:center}
+.stepper input{width:72px;text-align:center}
+.stepper button{min-width:40px;min-height:40px}
+.bar-presets{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
+.bar-presets button{min-height:32px;padding:4px 8px;font-size:11px}
+.row-btns{display:flex;flex-wrap:wrap;gap:6px}
+.row-btns button.active{background:var(--brand);color:#fff;border-color:var(--brand)}
+.bar-note{font-size:11px;color:var(--muted);margin:4px 0 0}
 
 .heading{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:8px;flex-shrink:0}
 .pill{font-size:11px;background:var(--brand-soft);color:var(--brand-deep);padding:5px 10px;border-radius:999px;white-space:nowrap}
@@ -419,6 +427,35 @@ footer.panel-foot{font-size:10px;color:var(--muted);margin-top:16px;line-height:
         <div class="field"><label for="label">ชื่ออุปกรณ์</label><input id="label" maxlength="40"></div>
         <div class="field"><label for="rating">พิกัด / หมายเหตุ</label><input id="rating" maxlength="40"></div>
         <div class="field"><label>ขนาดจริง</label><div class="muted" id="dev-size">—</div></div>
+        <div id="bar-props" hidden>
+          <div class="field">
+            <label for="bar-holes">จำนวนจุดเชื่อมต่อ</label>
+            <div class="stepper">
+              <button type="button" id="bar-holes-minus" title="ลด">−</button>
+              <input id="bar-holes" type="number" min="4" max="16" step="1" inputmode="numeric">
+              <button type="button" id="bar-holes-plus" title="เพิ่ม">+</button>
+            </div>
+            <div class="bar-presets" id="bar-presets"></div>
+          </div>
+          <div class="field"><label for="bar-length">ความยาวบาร์ (มม.)</label><input id="bar-length" type="number" min="40" max="240" step="1" inputmode="decimal"></div>
+          <div class="field">
+            <label>แนววาง</label>
+            <div class="row-btns">
+              <button type="button" id="bar-orient-h">แนวนอน</button>
+              <button type="button" id="bar-orient-v">แนวตั้ง</button>
+              <button type="button" id="bar-rotate" title="หมุน 90°">หมุน 90°</button>
+            </div>
+          </div>
+          <div class="field">
+            <label for="bar-role">บทบาท</label>
+            <select id="bar-role">
+              <option value="N">N · นิวทรัล (ขาน้ำเงิน)</option>
+              <option value="PE">PE · กราวด์ (ขาเขียว)</option>
+              <option value="generic">ทั่วไป (ขาเทา)</option>
+            </select>
+          </div>
+          <p class="bar-note">ลากจุดที่ปลายบาร์เพื่อปรับความยาว / จำนวนช่อง · วางอิสระบนแผ่น (กริด 2.5 มม.)</p>
+        </div>
         <button type="button" id="remove" class="danger">ลบอุปกรณ์</button>
       </div>
       <div id="wire-props" hidden>
