@@ -63,8 +63,52 @@ input,select{
 .brand{font-family:"IBM Plex Sans",sans-serif;font-size:18px;font-weight:700;letter-spacing:-.02em}
 .brand b{color:var(--brand)}
 .sub{font-size:10px;color:var(--muted);letter-spacing:.08em;margin-top:2px;text-transform:uppercase}
-.header-actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+.header-actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;align-items:center}
 .header-actions button{padding:8px 10px;font-size:13px}
+.design-badge{
+  display:flex;align-items:center;gap:6px;max-width:min(220px,36vw);
+  padding:6px 10px;border-radius:8px;background:var(--brand-soft);
+  border:1px solid #b7ddd3;min-height:40px;
+}
+.design-badge .design-name{
+  font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.design-badge .dirty-dot{
+  flex:0 0 auto;width:8px;height:8px;border-radius:50%;background:var(--warn);
+  box-shadow:0 0 0 2px #fff3;display:none;
+}
+.design-badge.dirty .dirty-dot{display:block}
+.design-badge .dirty-label{display:none;font-size:11px;color:var(--warn);font-weight:500}
+.design-badge.dirty .dirty-label{display:inline}
+.modal-backdrop{
+  position:fixed;inset:0;z-index:50;background:rgba(28,46,54,.45);
+  display:none;align-items:flex-end;justify-content:center;padding:12px;
+}
+.modal-backdrop.show{display:flex}
+.modal{
+  background:var(--panel);border-radius:14px 14px 10px 10px;width:min(520px,100%);
+  max-height:min(80dvh,640px);display:flex;flex-direction:column;
+  box-shadow:0 16px 48px #1c2e3640;overflow:hidden;
+}
+.modal-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:14px 16px;border-bottom:1px solid var(--line)}
+.modal-head h2{margin:0;font-size:16px}
+.modal-body{padding:12px 16px 16px;overflow:auto;flex:1;min-height:0}
+.modal-foot{padding:10px 16px;border-top:1px solid var(--line);display:flex;gap:8px;flex-wrap:wrap}
+.design-list{display:flex;flex-direction:column;gap:8px}
+.design-item{
+  border:1px solid var(--line);border-radius:10px;padding:10px 12px;
+  display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;
+  background:#fafcfc;
+}
+.design-item.active{border-color:var(--brand);background:var(--brand-soft)}
+.design-item .meta{font-size:11px;color:var(--muted);margin-top:2px}
+.design-item .actions{display:flex;flex-wrap:wrap;gap:4px;justify-content:flex-end}
+.design-item .actions button{min-height:36px;padding:6px 8px;font-size:12px}
+.design-empty{text-align:center;padding:28px 12px;color:var(--muted);font-size:13px}
+@media(min-width:701px){
+  .modal-backdrop{align-items:center}
+  .modal{border-radius:14px}
+}
 
 /* Layout */
 .layout{
@@ -285,8 +329,10 @@ footer.panel-foot{font-size:10px;color:var(--muted);margin-top:16px;line-height:
   .panel-right.open{display:block}
   .workspace{min-height:calc(100dvh - var(--header-h) - var(--tab-h));padding:10px}
   .stage-wrap{min-height:55dvh}
-  .app-header{padding:8px 10px;height:auto;min-height:var(--header-h)}
+  .app-header{padding:8px 10px;height:auto;min-height:var(--header-h);flex-wrap:wrap}
+  .header-actions{width:100%;justify-content:flex-start}
   .header-actions button{min-height:40px;font-size:12px;padding:6px 8px}
+  .design-badge{max-width:100%;flex:1 1 140px}
   .brand{font-size:16px}
   .catalog{grid-template-columns:1fr 1fr}
   .dim-grid{grid-template-columns:1fr 1fr}
@@ -307,9 +353,17 @@ footer.panel-foot{font-size:10px;color:var(--muted);margin-top:16px;line-height:
     <div class="sub">ออกแบบตู้ไฟ · มาตราส่วนจริง</div>
   </div>
   <div class="header-actions">
-    <button type="button" id="open" aria-label="เปิดไฟล์">เปิด</button>
-    <button type="button" id="save" aria-label="บันทึก JSON">บันทึก</button>
-    <button type="button" id="export" class="primary" aria-label="ส่งออก SVG">SVG ↗</button>
+    <div class="design-badge" id="design-badge" title="ชื่อแบบปัจจุบัน">
+      <span class="dirty-dot" aria-hidden="true"></span>
+      <span class="design-name" id="design-name">แบบใหม่</span>
+      <span class="dirty-label">ยังไม่บันทึก</span>
+    </div>
+    <button type="button" id="design-new" title="สร้างแบบใหม่">ใหม่</button>
+    <button type="button" id="designs-open" title="แบบที่บันทึกไว้">แบบของฉัน</button>
+    <button type="button" id="save" class="primary" title="บันทึกแบบ (Ctrl+S)">บันทึก</button>
+    <button type="button" id="export-json" title="ส่งออกไฟล์ .json">ส่งออก</button>
+    <button type="button" id="open" title="นำเข้าไฟล์ .json">นำเข้า</button>
+    <button type="button" id="export" title="ส่งออก SVG">SVG</button>
   </div>
 </header>
 
@@ -317,6 +371,21 @@ footer.panel-foot{font-size:10px;color:var(--muted);margin-top:16px;line-height:
   <aside class="panel panel-left" id="panel-catalog" data-panel="catalog">
     <div class="sheet-handle" id="sheet-handle" aria-hidden="true"></div>
     <div class="sheet-body">
+    <div class="section" id="designs-sheet-section">
+      <h2>แบบของฉัน</h2>
+      <p class="muted" style="margin:0 0 8px">บันทึกชื่อแบบในเครื่อง · ส่งออก/นำเข้า .json ได้</p>
+      <div class="row-btns" style="margin-bottom:8px">
+        <button type="button" id="design-new-sheet">แบบใหม่</button>
+        <button type="button" id="save-sheet" class="primary">บันทึก</button>
+        <button type="button" id="designs-open-sheet">รายการแบบ</button>
+      </div>
+      <div class="row-btns">
+        <button type="button" id="export-json-sheet">ส่งออก JSON</button>
+        <button type="button" id="open-sheet">นำเข้า JSON</button>
+      </div>
+      <p class="muted" id="design-sheet-meta" style="margin:8px 0 0">—</p>
+    </div>
+
     <div class="section">
       <h2>ประเภทตู้</h2>
       <div class="modes">
@@ -357,7 +426,7 @@ footer.panel-foot{font-size:10px;color:var(--muted);margin-top:16px;line-height:
       <div class="cat-filter" id="cat-filter"></div>
       <div class="catalog" id="catalog"></div>
     </div>
-    <footer class="panel-foot">ลากอุปกรณ์ลงตู้ · กดค้างบนมือถือเพื่อเริ่มลาก · บันทึกอัตโนมัติ<br>เพิ่มอุปกรณ์ได้ใน catalog.js</footer>
+    <footer class="panel-foot">ลากอุปกรณ์ลงตู้ · กดค้างบนมือถือเพื่อเริ่มลาก · บันทึกแบบได้จากปุ่มบันทึก<br>เพิ่มอุปกรณ์ได้ใน catalog.js</footer>
     </div>
   </aside>
 
@@ -513,6 +582,26 @@ footer.panel-foot{font-size:10px;color:var(--muted);margin-top:16px;line-height:
 </nav>
 
 <input id="file" type="file" accept="application/json,.json" hidden>
+
+<div class="modal-backdrop" id="designs-modal" role="dialog" aria-modal="true" aria-labelledby="designs-modal-title">
+  <div class="modal">
+    <div class="modal-head">
+      <h2 id="designs-modal-title">แบบของฉัน</h2>
+      <button type="button" id="designs-close" aria-label="ปิด">ปิด</button>
+    </div>
+    <div class="modal-body">
+      <div class="design-list" id="design-list"></div>
+      <div class="design-empty" id="design-empty" hidden>ยังไม่มีแบบที่บันทึก · กด「บันทึก」เพื่อเก็บแบบปัจจุบัน</div>
+    </div>
+    <div class="modal-foot">
+      <button type="button" id="design-new-modal">แบบใหม่</button>
+      <button type="button" id="save-modal" class="primary">บันทึกแบบปัจจุบัน</button>
+      <button type="button" id="export-json-modal">ส่งออก JSON</button>
+      <button type="button" id="open-modal">นำเข้า JSON</button>
+    </div>
+  </div>
+</div>
+
 <script src="catalog.js"></script>
 <script src="app.js"></script>
 </body>

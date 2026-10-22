@@ -5,6 +5,8 @@
   const C = window.PANEL_CATALOG;
   const MODULE = C.MODULE_MM;
   const STORAGE = 'panel-studio-v1';
+  const DESIGNS_KEY = 'panel-studio-designs-v1';
+  const SESSION_KEY = 'panel-studio-session-v1';
   const VERSION = 9;
   const LONG_PRESS_MS = 380;
   const MOVE_THRESH = 8;
@@ -481,6 +483,364 @@
     }
     return out;
   }
+  /* —— Named designs library —— */
+  let designSession = { id: null, name: 'แบบใหม่', savedJson: null };
+
+  function emptyProject() {
+    return {
+      version: VERSION,
+      AC: { devices: [], wires: [], cabinet: DEFAULT_CAB('AC') },
+      DC: { devices: [], wires: [], cabinet: DEFAULT_CAB('DC') }
+    };
+  }
+  function cloneData(src) {
+    return JSON.parse(JSON.stringify(src));
+  }
+  function readDesignLibrary() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(DESIGNS_KEY));
+      if (!raw || typeof raw !== 'object') return { version: 1, designs: [] };
+      const designs = Array.isArray(raw.designs)
+        ? raw.designs
+            .filter((d) => d && typeof d.id === 'string' && typeof d.name === 'string' && d.data)
+            .map((d) => ({
+              id: d.id,
+              name: String(d.name).slice(0, 80),
+              createdAt: Number(d.createdAt) || Date.now(),
+              updatedAt: Number(d.updatedAt) || Date.now(),
+              data: d.data
+            }))
+        : [];
+      designs.sort((a, b) => b.updatedAt - a.updatedAt);
+      return { version: 1, designs };
+    } catch (_) {
+      return { version: 1, designs: [] };
+    }
+  }
+  function writeDesignLibrary(lib) {
+    try {
+      localStorage.setItem(DESIGNS_KEY, JSON.stringify(lib));
+      return true;
+    } catch (_) {
+      $('status').textContent = 'พื้นที่บันทึกเต็ม — ลบบางแบบหรือส่งออกเป็นไฟล์';
+      return false;
+    }
+  }
+  function formatSavedAt(ts) {
+    if (!ts) return '—';
+    try {
+      return new Date(ts).toLocaleString('th-TH', {
+        dateStyle: 'medium',
+        timeStyle: 'short'
+      });
+    } catch (_) {
+      return new Date(ts).toLocaleString();
+    }
+  }
+  function isDesignDirty() {
+    if (designSession.savedJson == null) return true;
+    return JSON.stringify(data) !== designSession.savedJson;
+  }
+  function markDesignSaved(id, name) {
+    designSession.id = id || null;
+    designSession.name = (name || 'แบบใหม่').slice(0, 80);
+    designSession.savedJson = JSON.stringify(data);
+    persistSession();
+    updateDesignChrome();
+  }
+  function persistSession() {
+    try {
+      localStorage.setItem(
+        SESSION_KEY,
+        JSON.stringify({
+          id: designSession.id,
+          name: designSession.name,
+          savedJson: designSession.savedJson
+        })
+      );
+    } catch (_) {}
+  }
+  function loadSessionMeta() {
+    try {
+      const s = JSON.parse(localStorage.getItem(SESSION_KEY));
+      if (!s || typeof s !== 'object') return;
+      if (typeof s.name === 'string' && s.name.trim()) designSession.name = s.name.slice(0, 80);
+      if (typeof s.id === 'string') designSession.id = s.id;
+      if (typeof s.savedJson === 'string') designSession.savedJson = s.savedJson;
+    } catch (_) {}
+  }
+  function updateDesignChrome() {
+    const dirty = isDesignDirty();
+    const badge = $('design-badge');
+    const nameEl = $('design-name');
+    if (nameEl) nameEl.textContent = designSession.name || 'แบบใหม่';
+    if (badge) badge.classList.toggle('dirty', dirty);
+    const meta = $('design-sheet-meta');
+    if (meta) {
+      const lib = designSession.id ? readDesignLibrary().designs.find((d) => d.id === designSession.id) : null;
+      meta.textContent = dirty
+        ? `「${designSession.name}」 · มีการแก้ไขที่ยังไม่บันทึก`
+        : `「${designSession.name}」 · บันทึกล่าสุด ${formatSavedAt(lib?.updatedAt || Date.now())}`;
+    }
+    document.title = `${dirty ? '• ' : ''}${designSession.name} · Panel Studio`;
+  }
+  function askDesignName(prefill) {
+    const base = (prefill || designSession.name || 'แบบใหม่').slice(0, 80);
+    const name = window.prompt('ชื่อแบบที่ต้องการบันทึก', base);
+    if (name == null) return null;
+    const trimmed = name.trim().slice(0, 80);
+    if (!trimmed) {
+      $('status').textContent = 'ต้องระบุชื่อแบบ';
+      return null;
+    }
+    return trimmed;
+  }
+  function saveCurrentDesign() {
+    const name = askDesignName(designSession.name);
+    if (!name) return false;
+    const lib = readDesignLibrary();
+    const now = Date.now();
+    const payload = cloneData(data);
+    let entry = designSession.id ? lib.designs.find((d) => d.id === designSession.id) : null;
+    if (entry) {
+      entry.name = name;
+      entry.updatedAt = now;
+      entry.data = payload;
+    } else {
+      entry = {
+        id: crypto.randomUUID(),
+        name,
+        createdAt: now,
+        updatedAt: now,
+        data: payload
+      };
+      lib.designs.unshift(entry);
+    }
+    if (!writeDesignLibrary(lib)) return false;
+    markDesignSaved(entry.id, name);
+    $('status').textContent = `บันทึก「${name}」แล้ว`;
+    renderDesignList();
+    return true;
+  }
+  function loadDesignById(id, opts) {
+    const lib = readDesignLibrary();
+    const entry = lib.designs.find((d) => d.id === id);
+    if (!entry) {
+      $('status').textContent = 'ไม่พบแบบที่เลือก';
+      return false;
+    }
+    const m = migrate(entry.data);
+    if (!m) {
+      $('status').textContent = 'แบบนี้เปิดไม่ได้ (ข้อมูลเสีย)';
+      return false;
+    }
+    if (!(opts && opts.skipConfirm) && isDesignDirty()) {
+      if (!confirm('มีการแก้ไขที่ยังไม่บันทึก — เปิดแบบอื่นและทิ้งการแก้ไข?')) return false;
+    }
+    if (!(opts && opts.skipCheckpoint)) checkpoint();
+    data = m;
+    mode = 'AC';
+    selected = selectedWire = null;
+    history = [];
+    future = [];
+    designSession.id = entry.id;
+    designSession.name = entry.name;
+    designSession.savedJson = JSON.stringify(data);
+    persistSession();
+    persist();
+    fillPresets();
+    syncCabinetForm();
+    setMode('AC');
+    renderCatalog();
+    fitCamera();
+    render();
+    properties();
+    updateUndoRedo();
+    updateDesignChrome();
+    $('status').textContent = `เปิด「${entry.name}」แล้ว`;
+    return true;
+  }
+  function renameDesign(id) {
+    const lib = readDesignLibrary();
+    const entry = lib.designs.find((d) => d.id === id);
+    if (!entry) return;
+    const name = askDesignName(entry.name);
+    if (!name) return;
+    entry.name = name;
+    entry.updatedAt = Date.now();
+    if (!writeDesignLibrary(lib)) return;
+    if (designSession.id === id) {
+      designSession.name = name;
+      persistSession();
+    }
+    renderDesignList();
+    updateDesignChrome();
+    $('status').textContent = `เปลี่ยนชื่อเป็น「${name}」แล้ว`;
+  }
+  function duplicateDesign(id) {
+    const lib = readDesignLibrary();
+    const entry = lib.designs.find((d) => d.id === id);
+    if (!entry) return;
+    const name = askDesignName(`${entry.name} (สำเนา)`);
+    if (!name) return;
+    const now = Date.now();
+    const copy = {
+      id: crypto.randomUUID(),
+      name,
+      createdAt: now,
+      updatedAt: now,
+      data: cloneData(entry.data)
+    };
+    lib.designs.unshift(copy);
+    if (!writeDesignLibrary(lib)) return;
+    renderDesignList();
+    $('status').textContent = `ทำสำเนา「${name}」แล้ว`;
+  }
+  function deleteDesign(id) {
+    const lib = readDesignLibrary();
+    const entry = lib.designs.find((d) => d.id === id);
+    if (!entry) return;
+    if (!confirm(`ลบแบบ「${entry.name}」ถาวร?`)) return;
+    lib.designs = lib.designs.filter((d) => d.id !== id);
+    if (!writeDesignLibrary(lib)) return;
+    if (designSession.id === id) {
+      designSession.id = null;
+      designSession.savedJson = null;
+      persistSession();
+    }
+    renderDesignList();
+    updateDesignChrome();
+    $('status').textContent = `ลบ「${entry.name}」แล้ว`;
+  }
+  function newDesign() {
+    if (isDesignDirty()) {
+      if (!confirm('มีการแก้ไขที่ยังไม่บันทึก — สร้างแบบใหม่และทิ้งการแก้ไข?')) return;
+    }
+    checkpoint();
+    data = emptyProject();
+    mode = 'AC';
+    selected = selectedWire = null;
+    history = [];
+    future = [];
+    designSession = { id: null, name: 'แบบใหม่', savedJson: JSON.stringify(data) };
+    persistSession();
+    persist();
+    fillPresets();
+    syncCabinetForm();
+    setMode('AC');
+    renderCatalog();
+    fitCamera();
+    render();
+    properties();
+    updateUndoRedo();
+    updateDesignChrome();
+    closeDesignsModal();
+    $('status').textContent = 'สร้างแบบใหม่แล้ว';
+  }
+  function exportDesignJson() {
+    const name = (designSession.name || 'panel-design').replace(/[\\/:*?"<>|]+/g, '-').slice(0, 60);
+    const payload = {
+      format: 'panel-studio-design',
+      formatVersion: 1,
+      name: designSession.name,
+      id: designSession.id,
+      exportedAt: new Date().toISOString(),
+      data: cloneData(data)
+    };
+    download(`${name}.json`, JSON.stringify(payload, null, 2), 'application/json');
+    $('status').textContent = `ส่งออก「${designSession.name}」เป็นไฟล์แล้ว`;
+  }
+  function importDesignFromObject(raw) {
+    let name = null;
+    let payload = raw;
+    if (raw && raw.format === 'panel-studio-design' && raw.data) {
+      payload = raw.data;
+      if (typeof raw.name === 'string') name = raw.name.slice(0, 80);
+    }
+    const m = migrate(payload);
+    if (!m) return false;
+    if (isDesignDirty() && !confirm('มีการแก้ไขที่ยังไม่บันทึก — นำเข้าแบบและทิ้งการแก้ไข?')) return false;
+    checkpoint();
+    data = m;
+    mode = 'AC';
+    selected = selectedWire = null;
+    history = [];
+    future = [];
+    designSession.id = null;
+    designSession.name = name || 'แบบนำเข้า';
+    designSession.savedJson = null; // dirty until user saves into library
+    persistSession();
+    persist();
+    fillPresets();
+    syncCabinetForm();
+    setMode('AC');
+    renderCatalog();
+    fitCamera();
+    render();
+    properties();
+    updateUndoRedo();
+    updateDesignChrome();
+    $('status').textContent = `นำเข้า「${designSession.name}」แล้ว — กดบันทึกเพื่อเก็บในแบบของฉัน`;
+    return true;
+  }
+  function renderDesignList() {
+    const box = $('design-list');
+    const empty = $('design-empty');
+    if (!box) return;
+    const lib = readDesignLibrary();
+    box.replaceChildren();
+    if (empty) empty.hidden = lib.designs.length > 0;
+    lib.designs.forEach((entry) => {
+      const row = document.createElement('div');
+      row.className = 'design-item' + (entry.id === designSession.id ? ' active' : '');
+      const info = document.createElement('div');
+      info.innerHTML = `<strong>${escapeHtml(entry.name)}</strong><div class="meta">บันทึกล่าสุด ${escapeHtml(formatSavedAt(entry.updatedAt))}</div>`;
+      const actions = document.createElement('div');
+      actions.className = 'actions';
+      const mkBtn = (label, cls, fn) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.textContent = label;
+        if (cls) b.className = cls;
+        b.onclick = (e) => {
+          e.stopPropagation();
+          fn();
+        };
+        return b;
+      };
+      actions.append(
+        mkBtn('เปิด', 'primary', () => {
+          if (loadDesignById(entry.id)) closeDesignsModal();
+        }),
+        mkBtn('ชื่อ', null, () => renameDesign(entry.id)),
+        mkBtn('สำเนา', null, () => duplicateDesign(entry.id)),
+        mkBtn('ลบ', 'danger', () => deleteDesign(entry.id))
+      );
+      row.append(info, actions);
+      row.onclick = () => {
+        if (loadDesignById(entry.id)) closeDesignsModal();
+      };
+      box.append(row);
+    });
+  }
+  function escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+  function openDesignsModal() {
+    const modal = $('designs-modal');
+    if (!modal) return;
+    renderDesignList();
+    modal.classList.add('show');
+  }
+  function closeDesignsModal() {
+    const modal = $('designs-modal');
+    if (modal) modal.classList.remove('show');
+  }
+
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE));
     const m = migrate(saved);
@@ -492,6 +852,12 @@
       } catch (_) {}
     }
   } catch (_) {}
+  loadSessionMeta();
+  // If session points at a library entry, trust its name; sync savedJson to current draft
+  if (designSession.savedJson == null) {
+    // first run after upgrade: treat autosaved draft as clean under current name
+    designSession.savedJson = JSON.stringify(data);
+  }
 
   function checkpoint() {
     history.push(JSON.stringify(data));
@@ -505,6 +871,7 @@
     } catch (_) {
       $('status').textContent = 'พื้นที่บันทึกเต็ม กรุณาบันทึกเป็น JSON';
     }
+    updateDesignChrome();
   }
   function updateUndoRedo() {
     $('undo').disabled = !history.length;
@@ -3042,6 +3409,11 @@
   };
 
   document.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+      e.preventDefault();
+      saveCurrentDesign();
+      return;
+    }
     if (['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
       e.preventDefault();
@@ -3057,6 +3429,10 @@
       removeSelected();
     }
     if (e.key === 'Escape') {
+      if ($('designs-modal')?.classList.contains('show')) {
+        closeDesignsModal();
+        return;
+      }
       drag = null;
       wireSketch = null;
       updateWireDoneBtn();
@@ -3113,7 +3489,8 @@
     a.click();
     setTimeout(() => URL.revokeObjectURL(u), 1000);
   }
-  $('save').onclick = () => download('panel-studio.json', JSON.stringify(data, null, 2), 'application/json');
+  $('save').onclick = () => saveCurrentDesign();
+  $('export-json').onclick = () => exportDesignJson();
   $('export').onclick = () => {
     const c = cabinet();
     const s = board.cloneNode(true);
@@ -3125,28 +3502,38 @@
     download('panel-' + mode + '.svg', new XMLSerializer().serializeToString(s), 'image/svg+xml');
   };
   $('open').onclick = () => $('file').click();
+  $('design-new').onclick = () => newDesign();
+  $('designs-open').onclick = () => openDesignsModal();
+  $('designs-close').onclick = () => closeDesignsModal();
+  $('designs-modal').addEventListener('click', (e) => {
+    if (e.target === $('designs-modal')) closeDesignsModal();
+  });
+  $('design-new-modal').onclick = () => newDesign();
+  $('save-modal').onclick = () => {
+    if (saveCurrentDesign()) renderDesignList();
+  };
+  $('export-json-modal').onclick = () => exportDesignJson();
+  $('open-modal').onclick = () => $('file').click();
+  // Mobile / sheet duplicates
+  $('design-new-sheet').onclick = () => newDesign();
+  $('save-sheet').onclick = () => saveCurrentDesign();
+  $('designs-open-sheet').onclick = () => openDesignsModal();
+  $('export-json-sheet').onclick = () => exportDesignJson();
+  $('open-sheet').onclick = () => $('file').click();
+  $('design-badge').onclick = () => openDesignsModal();
   $('file').onchange = async () => {
     try {
       const f = $('file').files[0];
       if (!f || f.size > 2e6) throw new Error();
-      const m = migrate(JSON.parse(await f.text()));
-      if (!m) throw new Error();
-      checkpoint();
-      data = m;
-      selected = selectedWire = null;
-      fillPresets();
-      syncCabinetForm();
-      renderCatalog();
-      fitCamera();
-      render();
-      properties();
-      persist();
-      $('status').textContent = 'เปิดแบบเรียบร้อย';
+      const raw = JSON.parse(await f.text());
+      if (!importDesignFromObject(raw)) throw new Error();
+      closeDesignsModal();
     } catch (_) {
       $('status').textContent = 'ไฟล์ไม่ถูกต้อง';
     }
     $('file').value = '';
   };
+  updateDesignChrome();
 
   function setMobileTab(tab) {
     document.querySelectorAll('.mobile-tabs button').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
