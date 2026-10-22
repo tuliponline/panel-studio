@@ -62,6 +62,16 @@
       ['#2563EB', 'สัญญาณ']
     ]
   };
+  /** Display stroke width → conductor cross-section (mm²) */
+  const WIRE_MM2 = {
+    2: 1.5,
+    2.5: 2.5,
+    3.5: 4,
+    5: 6,
+    6.5: 10
+  };
+  const CAT_ORDER = ['protection', 'control', 'hmi', 'connect', 'busbar', 'automation'];
+  const DEFAULT_WIRE_SLACK_MM = 100;
 
   function cabinetFromPreset(p) {
     const L = C.layoutDefaults;
@@ -90,6 +100,7 @@
 
   let data = {
     version: VERSION,
+    settings: { wireSlackMm: DEFAULT_WIRE_SLACK_MM },
     AC: { devices: [], wires: [], cabinet: DEFAULT_CAB('AC') },
     DC: { devices: [], wires: [], cabinet: DEFAULT_CAB('DC') }
   };
@@ -416,7 +427,15 @@
   }
   function migrate(raw) {
     if (!raw || typeof raw !== 'object') return null;
-    const out = { version: VERSION, AC: null, DC: null };
+    const slack = Number(raw.settings && raw.settings.wireSlackMm);
+    const out = {
+      version: VERSION,
+      settings: {
+        wireSlackMm: Number.isFinite(slack) ? Math.max(0, Math.min(500, Math.round(slack))) : DEFAULT_WIRE_SLACK_MM
+      },
+      AC: null,
+      DC: null
+    };
     for (const m of ['AC', 'DC']) {
       const block = raw[m];
       if (!block || !Array.isArray(block.devices) || !Array.isArray(block.wires)) return null;
@@ -489,9 +508,19 @@
   function emptyProject() {
     return {
       version: VERSION,
+      settings: { wireSlackMm: getWireSlackMm() },
       AC: { devices: [], wires: [], cabinet: DEFAULT_CAB('AC') },
       DC: { devices: [], wires: [], cabinet: DEFAULT_CAB('DC') }
     };
+  }
+  function getWireSlackMm() {
+    const n = Number(data.settings && data.settings.wireSlackMm);
+    if (Number.isFinite(n)) return Math.max(0, Math.min(500, Math.round(n)));
+    return DEFAULT_WIRE_SLACK_MM;
+  }
+  function setWireSlackMm(v) {
+    if (!data.settings) data.settings = {};
+    data.settings.wireSlackMm = Math.max(0, Math.min(500, Math.round(Number(v) || 0)));
   }
   function cloneData(src) {
     return JSON.parse(JSON.stringify(src));
@@ -1159,6 +1188,332 @@
   function pathD(pts) {
     if (pts.length < 2) return '';
     return pts.map((p, i) => `${i ? 'L' : 'M'}${Math.round(p.x)},${Math.round(p.y)}`).join(' ');
+  }
+  function polylineLengthMm(pts) {
+    let len = 0;
+    for (let i = 1; i < pts.length; i++) len += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+    return len;
+  }
+  function wireCrossSectionMm2(w) {
+    const key = Number(w && w.width);
+    if (WIRE_MM2[key] != null) return WIRE_MM2[key];
+    // nearest known gauge
+    const keys = Object.keys(WIRE_MM2).map(Number).sort((a, b) => a - b);
+    let best = keys[0];
+    keys.forEach((k) => {
+      if (Math.abs(k - key) < Math.abs(best - key)) best = k;
+    });
+    return WIRE_MM2[best];
+  }
+  function wireColorLabel(hex) {
+    const h = String(hex || '').toLowerCase();
+    for (const list of Object.values(WIRE_COLORS)) {
+      const hit = list.find(([c]) => c.toLowerCase() === h);
+      if (hit) return hit[1];
+    }
+    return hex || '—';
+  }
+  function metresCeilFromMm(mm) {
+    // round up to next 0.1 m for purchasing
+    return Math.ceil(Math.max(0, mm) / 100) / 10;
+  }
+  function busbarStudForEnd(d, t, portIndex) {
+    if (isTerminalBar(t)) {
+      const g = terminalBarGeom(d, t);
+      if (g.style === 'copper') return 'M6';
+      if (g.style === 'idin') {
+        const pt = ports(d)[portIndex];
+        return pt && pt.large ? 'M5' : 'M4';
+      }
+      return g.secKey === '8x12' ? 'M5' : 'M4';
+    }
+    if (t.isBar) {
+      if ((t.id || '').includes('PE') || (t.name || '').includes('PE')) return 'M5';
+      return 'M4';
+    }
+    return 'M5';
+  }
+  function lugForWireEnd(end, mm2) {
+    if (!end || isFreeEnd(end)) {
+      return {
+        key: `fork|${mm2}`,
+        kind: 'fork',
+        mm2,
+        stud: null,
+        nameTh: `หางปลาแฉก ${mm2} มม²`,
+        hint: 'ปลายอิสระ / จุดเปิด'
+      };
+    }
+    const d = state().devices.find((x) => x.id === end.id);
+    const t = d && spec(d.type);
+    if (!t) {
+      return { key: `ferrule|${mm2}`, kind: 'ferrule', mm2, stud: null, nameTh: `หางปลาเข็ม ${mm2} มม²`, hint: 'เทอร์มินัลสกรู' };
+    }
+    if (isTerminalBar(t) || t.isBar) {
+      const stud = busbarStudForEnd(d, t, end.i);
+      return {
+        key: `ring|${stud}|${mm2}`,
+        kind: 'ring',
+        mm2,
+        stud,
+        nameTh: `หางปลากลม ${stud} · ${mm2} มม²`,
+        hint: t.nameTh || t.name || 'บัสบาร์'
+      };
+    }
+    // Screw-clamp DIN devices: breakers, contactors, relays, TB, meters on DIN, etc.
+    if (t.freePlace && (t.cat === 'hmi' || t.cat === 'automation')) {
+      return {
+        key: `fork|${mm2}`,
+        kind: 'fork',
+        mm2,
+        stud: null,
+        nameTh: `หางปลาแฉก ${mm2} มม²`,
+        hint: t.nameTh || 'หน้าตู้'
+      };
+    }
+    return {
+      key: `ferrule|${mm2}`,
+      kind: 'ferrule',
+      mm2,
+      stud: null,
+      nameTh: `หางปลาเข็ม (Ferrule) ${mm2} มม²`,
+      hint: 'ขั้วสกรู DIN / เบรกเกอร์ / คอนแทคเตอร์'
+    };
+  }
+  function deviceBomLabel(d, t) {
+    const name = t.nameTh || t.name || d.type;
+    if (isTerminalBar(t)) {
+      const g = terminalBarGeom(d, t);
+      if (g.style === 'copper') return `${name} (${g.ratingAmps || 110}A · ${g.holes} จุด)`;
+      if (g.style === 'idin') return `${name} (${g.holes} จุด)`;
+      return `${name} (${g.secKey} · ${g.baseStyle === 'wing' ? 'ปีก' : 'มาตรฐาน'} · ${g.holes} ช่อง)`;
+    }
+    const bits = [name];
+    if (t.brand) bits.push(t.brand + (t.model ? ' ' + t.model : ''));
+    if (d.rating && d.rating !== t.ratingDefault) bits.push(d.rating);
+    return bits.join(' · ');
+  }
+  function computeBom() {
+    const slack = getWireSlackMm();
+    const deviceMap = new Map();
+    state().devices.forEach((d) => {
+      const t = spec(d.type);
+      if (!t) return;
+      const label = deviceBomLabel(d, t);
+      const cat = t.cat || 'other';
+      const key = cat + '||' + label;
+      const cur = deviceMap.get(key) || { cat, label, qty: 0, modules: t.modules || 0 };
+      cur.qty += 1;
+      deviceMap.set(key, cur);
+    });
+    const devicesByCat = {};
+    deviceMap.forEach((row) => {
+      if (!devicesByCat[row.cat]) devicesByCat[row.cat] = [];
+      devicesByCat[row.cat].push(row);
+    });
+    Object.values(devicesByCat).forEach((arr) => arr.sort((a, b) => a.label.localeCompare(b.label, 'th')));
+
+    const wireMap = new Map();
+    let drawnMm = 0;
+    let slackMm = 0;
+    state().wires.forEach((w) => {
+      const pts = wirePolyline(w);
+      const geom = polylineLengthMm(pts);
+      const addSlack = slack * 2;
+      drawnMm += geom;
+      slackMm += addSlack;
+      const mm2 = wireCrossSectionMm2(w);
+      const color = (w.color || '').toLowerCase();
+      const key = `${mm2}|${color}`;
+      const cur = wireMap.get(key) || {
+        mm2,
+        color: w.color,
+        colorLabel: wireColorLabel(w.color),
+        count: 0,
+        drawnMm: 0,
+        slackMm: 0
+      };
+      cur.count += 1;
+      cur.drawnMm += geom;
+      cur.slackMm += addSlack;
+      wireMap.set(key, cur);
+    });
+    const wires = [...wireMap.values()]
+      .map((row) => ({
+        ...row,
+        totalMm: row.drawnMm + row.slackMm,
+        metres: metresCeilFromMm(row.drawnMm + row.slackMm)
+      }))
+      .sort((a, b) => a.mm2 - b.mm2 || a.colorLabel.localeCompare(b.colorLabel, 'th'));
+
+    const lugMap = new Map();
+    state().wires.forEach((w) => {
+      const mm2 = wireCrossSectionMm2(w);
+      [w.a, w.b].forEach((end) => {
+        const lug = lugForWireEnd(end, mm2);
+        const cur = lugMap.get(lug.key) || { ...lug, qty: 0 };
+        cur.qty += 1;
+        lugMap.set(lug.key, cur);
+      });
+    });
+    const kindOrder = { ferrule: 0, ring: 1, fork: 2 };
+    const lugs = [...lugMap.values()].sort(
+      (a, b) => (kindOrder[a.kind] ?? 9) - (kindOrder[b.kind] ?? 9) || a.mm2 - b.mm2 || (a.stud || '').localeCompare(b.stud || '')
+    );
+
+    const totalMm = drawnMm + slackMm;
+    return {
+      slack,
+      devicesByCat,
+      deviceCount: state().devices.length,
+      wires,
+      wireCount: state().wires.length,
+      drawnMm,
+      slackMm,
+      totalMm,
+      totalMetres: metresCeilFromMm(totalMm),
+      lugs,
+      lugCount: lugs.reduce((s, x) => s + x.qty, 0)
+    };
+  }
+  function bomToText(bom) {
+    const lines = [];
+    lines.push(`สรุปรายการวัสดุ — ${designSession.name || 'แบบ'}`);
+    lines.push(`โหมด ${mode} · เผื่อปลายสาย ${bom.slack} มม./ด้าน`);
+    lines.push('');
+    lines.push('## อุปกรณ์ (ตามหมวด)');
+    const cats = [...CAT_ORDER, ...Object.keys(bom.devicesByCat).filter((c) => !CAT_ORDER.includes(c))];
+    cats.forEach((cat) => {
+      const rows = bom.devicesByCat[cat];
+      if (!rows || !rows.length) return;
+      lines.push(`### ${C.categories[cat] || cat}`);
+      rows.forEach((r) => lines.push(`- ${r.label} × ${r.qty}`));
+    });
+    if (!bom.deviceCount) lines.push('(ไม่มีอุปกรณ์)');
+    lines.push('');
+    lines.push('## สายไฟ');
+    lines.push(`ความยาวจากเส้นจริง ${Math.round(bom.drawnMm)} มม. + เผื่อปลาย ${Math.round(bom.slackMm)} มม. = รวม ${bom.totalMetres} ม. (ปัดขึ้น 0.1 ม.)`);
+    if (bom.wires.length) {
+      bom.wires.forEach((w) => {
+        lines.push(`- ${w.mm2} มม² · ${w.colorLabel} · ${w.count} เส้น · ${w.metres} ม.`);
+      });
+    } else lines.push('(ไม่มีสาย)');
+    lines.push('');
+    lines.push('## หางปลา / ขั้วสาย');
+    if (bom.lugs.length) {
+      bom.lugs.forEach((l) => lines.push(`- ${l.nameTh} × ${l.qty}${l.hint ? ' — ' + l.hint : ''}`));
+    } else lines.push('(ไม่มีหางปลา)');
+    lines.push('');
+    lines.push(`รวมอุปกรณ์ ${bom.deviceCount} · สาย ${bom.wireCount} · หางปลา ${bom.lugCount}`);
+    return lines.join('\n');
+  }
+  function renderBomPanel() {
+    const bom = computeBom();
+    const empty = $('bom-empty');
+    const devBox = $('bom-devices');
+    const wireBox = $('bom-wires');
+    const lugBox = $('bom-lugs');
+    const totalEl = $('wire-len-total');
+    if (totalEl) totalEl.textContent = bom.wireCount ? `${bom.totalMetres} ม.` : '—';
+    const slackInput = $('wire-slack');
+    if (slackInput && document.activeElement !== slackInput) slackInput.value = String(bom.slack);
+
+    const hasAny = bom.deviceCount || bom.wireCount;
+    if (empty) empty.hidden = hasAny;
+    if (!devBox || !wireBox || !lugBox) return bom;
+
+    if (!bom.deviceCount) {
+      devBox.hidden = true;
+      devBox.innerHTML = '';
+    } else {
+      devBox.hidden = false;
+      let html = '<h3>อุปกรณ์ตามหมวด</h3><table><tbody>';
+      const cats = [...CAT_ORDER, ...Object.keys(bom.devicesByCat).filter((c) => !CAT_ORDER.includes(c))];
+      cats.forEach((cat) => {
+        const rows = bom.devicesByCat[cat];
+        if (!rows || !rows.length) return;
+        html += `<tr><td class="cat" colspan="2">${C.categories[cat] || cat}</td></tr>`;
+        rows.forEach((r) => {
+          html += `<tr><td>${r.label}</td><td class="num">× ${r.qty}</td></tr>`;
+        });
+      });
+      html += `</tbody></table><p class="bom-total" style="margin:8px 0 0">รวม ${bom.deviceCount} ชิ้น</p>`;
+      devBox.innerHTML = html;
+    }
+
+    if (!bom.wireCount) {
+      wireBox.hidden = true;
+      wireBox.innerHTML = '';
+    } else {
+      wireBox.hidden = false;
+      let html =
+        '<h3>สายไฟ (ความยาวจริง + เผื่อปลาย)</h3>' +
+        `<p class="muted" style="margin:0 0 8px">เส้นจริง ${Math.round(bom.drawnMm)} มม. + เผื่อ ${Math.round(bom.slackMm)} มม. (${bom.slack} มม.×2 ต่อเส้น) · แสดงเป็นเมตรปัดขึ้น 0.1</p>` +
+        '<table><thead><tr><th>ขนาด</th><th>สี</th><th class="num">เส้น</th><th class="num">ยาว</th></tr></thead><tbody>';
+      bom.wires.forEach((w) => {
+        html += `<tr><td>${w.mm2} มม²</td><td><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:${w.color};margin-right:4px;vertical-align:middle"></span>${w.colorLabel}</td><td class="num">${w.count}</td><td class="num">${w.metres} ม.</td></tr>`;
+      });
+      html += `</tbody></table><p class="bom-total" style="margin:8px 0 0">รวมสาย ${bom.totalMetres} ม. (${bom.wireCount} เส้น)</p>`;
+      wireBox.innerHTML = html;
+    }
+
+    if (!bom.lugs.length) {
+      lugBox.hidden = true;
+      lugBox.innerHTML = '';
+    } else {
+      lugBox.hidden = false;
+      let html =
+        '<h3>หางปลา / ขั้วสาย</h3>' +
+        '<table><thead><tr><th>ชนิด</th><th class="num">จำนวน</th></tr></thead><tbody>';
+      bom.lugs.forEach((l) => {
+        html += `<tr><td>${l.nameTh}<div class="muted" style="font-size:11px">${l.hint || ''}</div></td><td class="num">× ${l.qty}</td></tr>`;
+      });
+      html += `</tbody></table><p class="bom-total" style="margin:8px 0 0">รวมหางปลา ${bom.lugCount} ชิ้น</p>`;
+      lugBox.innerHTML = html;
+    }
+
+    // Keep legacy hidden field for any old consumers
+    const legacy = $('bom');
+    if (legacy) {
+      legacy.textContent = [
+        ...Object.values(bom.devicesByCat).flat().map((r) => `${r.label} × ${r.qty}`),
+        ...bom.wires.map((w) => `สาย ${w.mm2}มม² ${w.colorLabel} ${w.metres}ม`),
+        ...bom.lugs.map((l) => `${l.nameTh} × ${l.qty}`)
+      ].join(' · ');
+    }
+    return bom;
+  }
+  function exportBom() {
+    const bom = computeBom();
+    const name = (designSession.name || 'bom').replace(/[\\/:*?"<>|]+/g, '-').slice(0, 60);
+    download(`${name}-bom.txt`, bomToText(bom), 'text/plain;charset=utf-8');
+    $('status').textContent = 'ส่งออก BOM แล้ว';
+  }
+  function printBom() {
+    renderBomPanel();
+    const bom = computeBom();
+    const html = `<!doctype html><html lang="th"><head><meta charset="utf-8"><title>BOM — ${escapeHtml(designSession.name)}</title>
+<style>body{font:14px/1.5 "IBM Plex Sans Thai",sans-serif;padding:24px;color:#1c2e36}
+h1{font-size:18px}h2{font-size:14px;margin:18px 0 8px;color:#0a6b5c}
+table{width:100%;border-collapse:collapse;margin:6px 0 12px}
+th,td{border-bottom:1px solid #d4dee6;padding:6px 4px;text-align:left;font-size:13px}
+.num{text-align:right} .muted{color:#6a7c86;font-size:12px}
+@media print{button{display:none}}</style></head><body>
+<h1>สรุปรายการวัสดุ (BOM)</h1>
+<p class="muted">${escapeHtml(designSession.name)} · โหมด ${mode} · เผื่อปลายสาย ${bom.slack} มม./ด้าน</p>
+${$('bom-devices').hidden ? '' : '<h2>อุปกรณ์</h2>' + $('bom-devices').innerHTML}
+${$('bom-wires').hidden ? '' : '<h2>สายไฟ</h2>' + $('bom-wires').innerHTML}
+${$('bom-lugs').hidden ? '' : '<h2>หางปลา</h2>' + $('bom-lugs').innerHTML}
+<p class="muted">สร้างจาก Panel Studio · ความยาวสายจากเรขาคณิตที่วาดจริง ปัดขึ้น 0.1 ม.</p>
+<script>window.onload=()=>window.print()</script>
+</body></html>`;
+    const w = window.open('', '_blank', 'noopener,noreferrer');
+    if (!w) {
+      $('status').textContent = 'เปิดหน้าต่างพิมพ์ไม่ได้ — อนุญาตป๊อปอัปแล้วลองใหม่';
+      return;
+    }
+    w.document.write(html);
+    w.document.close();
   }
   function gridSnap(p) {
     if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y)) return p;
@@ -2098,28 +2453,7 @@
     $('count').textContent = state().devices.length;
     $('wcount').textContent = state().wires.length;
     $('mod-use').textContent = byRail.map((m) => `${m}/${maxMods}`).join(' · ') || '—';
-    const counts = {};
-    state().devices.forEach((d) => {
-      counts[d.type] = (counts[d.type] || 0) + 1;
-    });
-    $('bom').textContent = Object.entries(counts)
-      .map(([k, v]) => {
-        const t = spec(k) || {};
-        const name = t.nameTh || t.name || k;
-        if (isTerminalBar(t)) {
-          const samples = state().devices.filter((d) => d.type === k);
-          const parts = samples.map((s) => {
-            const g = terminalBarGeom(s, t);
-            if (g.style === 'copper') return `${g.ratingAmps || 110}A · ${g.holes} จุด`;
-            if (g.style === 'idin') return `${g.holes} จุด`;
-            return `${g.secKey} · ${g.baseStyle === 'wing' ? 'ปีก' : 'มาตรฐาน'} · ${g.holes} ช่อง`;
-          });
-          const uniq = [...new Set(parts)];
-          return uniq.length === 1 ? `${name} (${uniq[0]}) × ${v}` : `${name} × ${v} [${uniq.join('; ')}]`;
-        }
-        return `${name} × ${v}`;
-      })
-      .join(' · ');
+    renderBomPanel();
     const warn = $('warnings');
     if (msgs.length) {
       warn.classList.add('show');
@@ -3389,9 +3723,19 @@
     if (!w) return;
     checkpoint();
     w.width = parseFloat($('wprop-size').value) || 2.5;
+    $('wire-size').value = String(w.width);
     render();
     persist();
   };
+  $('wire-slack').onchange = () => {
+    checkpoint();
+    setWireSlackMm($('wire-slack').value);
+    renderBomPanel();
+    persist();
+    $('status').textContent = `ตั้งเผื่อปลายสาย ${getWireSlackMm()} มม./ด้าน`;
+  };
+  $('bom-export').onclick = () => exportBom();
+  $('bom-print').onclick = () => printBom();
   $('wprop-route').onchange = () => {
     const w = state().wires.find((x) => x.id === selectedWire);
     if (!w) return;

@@ -206,6 +206,19 @@ svg#board{
 .stat{display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid #e8eef1;font-size:13px}
 .stat b{font-variant-numeric:tabular-nums}
 .bom{font-size:12px;color:var(--muted);line-height:1.6;margin:8px 0 0}
+.bom-panel{margin-top:8px;display:flex;flex-direction:column;gap:12px}
+.bom-block{border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:#fafcfc}
+.bom-block h3{margin:0 0 8px;font-size:12px;font-weight:600;color:var(--brand-deep)}
+.bom-block table{width:100%;border-collapse:collapse;font-size:12px}
+.bom-block th,.bom-block td{text-align:left;padding:4px 0;border-bottom:1px solid #e8eef1;vertical-align:top}
+.bom-block th{color:var(--muted);font-weight:500}
+.bom-block tr:last-child td{border-bottom:0}
+.bom-block .num{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+.bom-block .cat{font-weight:600;color:var(--ink);padding-top:8px}
+.bom-total{font-weight:600;color:var(--ink)}
+.bom-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px}
+.bom-actions button{min-height:36px;padding:6px 10px;font-size:12px}
+.bom-empty{color:var(--muted);font-size:12px}
 .note{
   background:var(--warn-bg);color:var(--warn);padding:10px;font-size:11px;
   border-radius:8px;margin-top:16px;line-height:1.6;
@@ -443,11 +456,12 @@ footer.panel-foot{font-size:10px;color:var(--muted);margin-top:16px;line-height:
       <button type="button" id="wire">⌁ เดินสาย</button>
       <span class="color-chips" id="color-chips" aria-label="สีสายด่วน"></span>
       <select id="color" aria-label="ประเภทสาย" hidden></select>
-      <select id="wire-size" aria-label="ขนาดสาย">
-        <option value="2">บาง · 2</option>
-        <option value="2.5" selected>ปกติ · 2.5</option>
-        <option value="3.5">กลาง · 3.5</option>
-        <option value="5">หนา · 5</option>
+      <select id="wire-size" aria-label="ขนาดสาย มม²">
+        <option value="2">1.5 มม²</option>
+        <option value="2.5" selected>2.5 มม²</option>
+        <option value="3.5">4 มม²</option>
+        <option value="5">6 มม²</option>
+        <option value="6.5">10 มม²</option>
       </select>
       <select id="wire-route" aria-label="แนวสาย">
         <option value="free" selected>อิสระ</option>
@@ -543,12 +557,13 @@ footer.panel-foot{font-size:10px;color:var(--muted);margin-top:16px;line-height:
       </div>
       <div id="wire-props" hidden>
         <div class="field"><label for="wprop-color">สีสาย</label><select id="wprop-color"></select></div>
-        <div class="field"><label for="wprop-size">ขนาดเส้น</label>
+        <div class="field"><label for="wprop-size">ขนาดสาย (มม²)</label>
           <select id="wprop-size">
-            <option value="2">บาง · 2</option>
-            <option value="2.5">ปกติ · 2.5</option>
-            <option value="3.5">กลาง · 3.5</option>
-            <option value="5">หนา · 5</option>
+            <option value="2">1.5 มม²</option>
+            <option value="2.5">2.5 มม²</option>
+            <option value="3.5">4 มม²</option>
+            <option value="5">6 มม²</option>
+            <option value="6.5">10 มม²</option>
           </select>
         </div>
         <div class="field"><label for="wprop-route">แนวเดินสาย</label>
@@ -563,13 +578,28 @@ footer.panel-foot{font-size:10px;color:var(--muted);margin-top:16px;line-height:
         <button type="button" id="remove-wire" class="danger">ลบสาย</button>
       </div>
     </div>
-    <div style="margin-top:20px">
-      <h2>รายการในตู้</h2>
+    <div style="margin-top:20px" id="summary-panel">
+      <h2>สรุป / รายการวัสดุ (BOM)</h2>
       <div class="stat"><span>อุปกรณ์</span><b id="count">0</b></div>
       <div class="stat"><span>สายเชื่อมต่อ</span><b id="wcount">0</b></div>
       <div class="stat"><span>ราง DIN</span><b id="rail-count">3</b></div>
       <div class="stat"><span>โมดูลใช้ / ราง</span><b id="mod-use">—</b></div>
-      <p class="bom" id="bom"></p>
+      <div class="stat"><span>ความยาวสายรวม</span><b id="wire-len-total">—</b></div>
+      <div class="field" style="margin-top:10px">
+        <label for="wire-slack">เผื่อปลายสายต่อด้าน (มม.)</label>
+        <input id="wire-slack" type="number" min="0" max="500" step="10" value="100" inputmode="numeric" title="บวกเข้าทุกปลายสายเมื่อคำนวณความยาว">
+      </div>
+      <div class="bom-panel" id="bom-panel">
+        <p class="bom-empty" id="bom-empty">ยังไม่มีอุปกรณ์หรือสายในตู้</p>
+        <div id="bom-devices" class="bom-block" hidden></div>
+        <div id="bom-wires" class="bom-block" hidden></div>
+        <div id="bom-lugs" class="bom-block" hidden></div>
+      </div>
+      <div class="bom-actions">
+        <button type="button" id="bom-export">ส่งออก BOM</button>
+        <button type="button" id="bom-print">พิมพ์สรุป</button>
+      </div>
+      <p class="bom" id="bom" hidden></p>
     </div>
     <div class="note">เครื่องมือจัดวางแนวคิดตามมาตราส่วนตู้จริง ยังไม่ตรวจสอบวงจร พิกัด การป้องกัน หรือมาตรฐานงานติดตั้ง ต้องให้ผู้เชี่ยวชาญตรวจแบบก่อนใช้งานจริง</div>
   </aside>
